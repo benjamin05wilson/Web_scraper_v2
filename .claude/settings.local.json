@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx playwright:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npm run server:*)",
+      "Bash(powershell.exe -Command \"Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Seconds 2; Write-Host ''Node processes killed''\")",
+      "Bash(npx tsx:*)",
+      "Bash(npx tsc:*)",
+      "Bash(cat:*)"
+    ]
+  }
+}
