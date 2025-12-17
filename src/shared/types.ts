@@ -246,6 +246,7 @@ export interface SavedScraper {
   createdAt: number;
   updatedAt: number;
   lastRunAt?: number;
+  isTemplate?: boolean;
 }
 
 export interface SavedScrapeResult {

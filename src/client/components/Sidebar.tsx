@@ -50,6 +50,8 @@ interface SidebarProps {
   scraperName?: string;
   onScraperNameChange?: (name: string) => void;
   onSaveScraper?: () => void;
+  hasUnsavedChanges?: boolean;
+  lastSavedAt?: number | null;
 }
 
 const SELECTOR_ROLES: { role: SelectorRole; label: string; extractionType: string }[] = [
@@ -87,6 +89,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   scraperName: externalScraperName,
   onScraperNameChange,
   onSaveScraper,
+  hasUnsavedChanges,
+  lastSavedAt,
 }) => {
   const [expandedPanels, setExpandedPanels] = useState({
     selectors: true,
@@ -288,18 +292,38 @@ export const Sidebar: React.FC<SidebarProps> = ({
     executeScrape,
   ]);
 
+  // Format relative time for last saved
+  const getRelativeTime = (timestamp: number | null | undefined) => {
+    if (!timestamp) return null;
+    const now = Date.now();
+    const diff = now - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  };
+
   return (
     <div className="sidebar">
       {/* Header */}
       <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)' }}>
-        <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Scraper Builder</h1>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>Scraper Builder</h1>
+          {lastSavedAt !== null && lastSavedAt !== undefined ? (
+            <span className={`save-indicator ${hasUnsavedChanges ? 'unsaved' : 'saved'}`}>
+              {hasUnsavedChanges ? 'Unsaved' : `Saved ${getRelativeTime(lastSavedAt)}`}
+            </span>
+          ) : null}
+        </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             className={`btn ${selectionMode ? 'active' : ''}`}
             onClick={toggleSelectionMode}
             style={{ flex: 1 }}
           >
-            {selectionMode ? '✓ Select Mode' : 'Select Mode'}
+            {selectionMode ? '\u2713 Select Mode' : 'Select Mode'}
           </button>
         </div>
       </div>

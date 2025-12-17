@@ -10,6 +10,7 @@ import { BrowserView } from '../../components/BrowserView';
 import { Sidebar } from '../../components/Sidebar';
 import { NavBar } from '../../components/NavBar';
 import { useScraperContext } from '../../context/ScraperContext';
+import { useToast } from '../../context/ToastContext';
 import type { MouseEvent as AppMouseEvent, SessionConfig } from '../../../shared/types';
 
 const WS_URL = `ws://${window.location.hostname}:3002/ws`;
@@ -23,10 +24,13 @@ const APP_NAV_HEIGHT = 48;
 export const ScraperBuilder: React.FC = () => {
   const { id: scraperId } = useParams<{ id?: string }>();
   const { getScraperById, saveScraper, updateScraper, saveResult } = useScraperContext();
+  const { showToast } = useToast();
 
   const mainContentRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ width: 1280, height: 720 });
   const [scraperName, setScraperName] = useState('My Scraper');
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
 
   // Calculate viewport based on available screen space
   useEffect(() => {
@@ -159,6 +163,13 @@ export const ScraperBuilder: React.FC = () => {
     [sessionId, send]
   );
 
+  // Track unsaved changes
+  useEffect(() => {
+    if (lastSavedAt !== null) {
+      setHasUnsavedChanges(true);
+    }
+  }, [scraperName, assignedSelectors, recordedActions, currentUrl]);
+
   // Handle saving scraper
   const handleSaveScraper = useCallback(() => {
     const config = {
@@ -175,12 +186,15 @@ export const ScraperBuilder: React.FC = () => {
 
     if (scraperId) {
       updateScraper(scraperId, { name: scraperName, config });
+      showToast(`Scraper "${scraperName}" updated`, 'success');
     } else {
       saveScraper(scraperName, config);
+      showToast(`Scraper "${scraperName}" saved`, 'success');
     }
 
-    alert('Scraper saved successfully!');
-  }, [scraperName, currentUrl, assignedSelectors, recordedActions, scraperId, saveScraper, updateScraper]);
+    setHasUnsavedChanges(false);
+    setLastSavedAt(Date.now());
+  }, [scraperName, currentUrl, assignedSelectors, recordedActions, scraperId, saveScraper, updateScraper, showToast]);
 
   // Handle scrape result - save to context
   useEffect(() => {
@@ -229,6 +243,8 @@ export const ScraperBuilder: React.FC = () => {
         scraperName={scraperName}
         onScraperNameChange={setScraperName}
         onSaveScraper={handleSaveScraper}
+        hasUnsavedChanges={hasUnsavedChanges}
+        lastSavedAt={lastSavedAt}
       />
 
       {/* Main content area */}

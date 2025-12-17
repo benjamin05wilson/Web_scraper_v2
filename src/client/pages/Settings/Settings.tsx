@@ -5,68 +5,142 @@
 import React, { useState, useEffect } from 'react';
 import { useTheme } from '../../context/ThemeContext';
 import { useScraperContext } from '../../context/ScraperContext';
+import { useToast } from '../../context/ToastContext';
+import { ConfirmModal } from '../../components/common';
 import type { ExportFormat, ThemeMode } from '../../../shared/types';
 
 const STORAGE_KEY = 'web-scraper-settings';
 
+interface AppSettings {
+  defaultExportFormat: ExportFormat;
+  maxPages: number;
+  delayBetweenPages: number;
+  autoSaveResults: boolean;
+  includeMetadata: boolean;
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  defaultExportFormat: 'json',
+  maxPages: 10,
+  delayBetweenPages: 1000,
+  autoSaveResults: true,
+  includeMetadata: true,
+};
+
 export const Settings: React.FC = () => {
   const { theme, setTheme } = useTheme();
-  const { savedScrapers, savedResults, clearAllResults } = useScraperContext();
-  const [defaultExportFormat, setDefaultExportFormat] = useState<ExportFormat>('json');
+  const { savedScrapers, savedResults, clearAllResults, clearAllData, exportBackup, importBackup, totalScrapedItems } = useScraperContext();
+  const { showToast } = useToast();
+
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<'clearResults' | 'clearAll' | null>(null);
 
   // Load settings
   useEffect(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        const settings = JSON.parse(stored);
-        if (settings.defaultExportFormat) {
-          setDefaultExportFormat(settings.defaultExportFormat);
-        }
+        const loadedSettings = JSON.parse(stored);
+        setSettings({ ...DEFAULT_SETTINGS, ...loadedSettings });
       }
     } catch (e) {
       console.error('[Settings] Failed to load settings:', e);
     }
   }, []);
 
-  // Save export format preference
-  const handleExportFormatChange = (format: ExportFormat) => {
-    setDefaultExportFormat(format);
+  // Save settings
+  const updateSettings = (updates: Partial<AppSettings>) => {
+    const newSettings = { ...settings, ...updates };
+    setSettings(newSettings);
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      const settings = stored ? JSON.parse(stored) : {};
-      settings.defaultExportFormat = format;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(newSettings));
+      showToast('Settings saved', 'success');
     } catch (e) {
       console.error('[Settings] Failed to save settings:', e);
+      showToast('Failed to save settings', 'error');
     }
   };
 
   const handleClearResults = () => {
-    if (confirm('Delete ALL scrape results? This cannot be undone.')) {
-      clearAllResults();
-    }
+    clearAllResults();
+    setConfirmAction(null);
+    showToast('All results cleared', 'success');
   };
 
   const handleClearAllData = () => {
-    if (confirm('Delete ALL data including scrapers and results? This cannot be undone.')) {
-      localStorage.removeItem('web-scraper-scrapers');
-      localStorage.removeItem('web-scraper-results');
-      window.location.reload();
-    }
+    clearAllData();
+    setConfirmAction(null);
+    showToast('All data cleared', 'success');
   };
 
-  const themeOptions: { value: ThemeMode; label: string; description: string }[] = [
-    { value: 'dark', label: 'Dark', description: 'Dark theme (default)' },
-    { value: 'light', label: 'Light', description: 'Light theme' },
-    { value: 'system', label: 'System', description: 'Follow system preference' },
+  const handleExportBackup = () => {
+    const backupData = exportBackup();
+    const blob = new Blob([backupData], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `web-scraper-backup-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Backup downloaded', 'success');
+  };
+
+  const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const data = event.target?.result as string;
+      if (importBackup(data)) {
+        showToast('Backup imported successfully', 'success');
+      } else {
+        showToast('Failed to import backup - invalid file', 'error');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const themeOptions: { value: ThemeMode; label: string }[] = [
+    { value: 'dark', label: 'Dark' },
+    { value: 'light', label: 'Light' },
+    { value: 'system', label: 'System' },
   ];
 
-  const exportOptions: { value: ExportFormat; label: string; description: string }[] = [
-    { value: 'json', label: 'JSON', description: 'JavaScript Object Notation' },
-    { value: 'csv', label: 'CSV', description: 'Comma-Separated Values' },
-    { value: 'xlsx', label: 'Excel', description: 'Excel Spreadsheet (.xlsx)' },
+  const exportOptions: { value: ExportFormat; label: string }[] = [
+    { value: 'json', label: 'JSON' },
+    { value: 'csv', label: 'CSV' },
+    { value: 'xlsx', label: 'Excel' },
   ];
+
+  const shortcuts = [
+    { key: 'Ctrl + N', description: 'Create new scraper' },
+    { key: 'Ctrl + S', description: 'Save current scraper' },
+    { key: 'Ctrl + E', description: 'Export results' },
+    { key: 'Escape', description: 'Cancel selection / Close modal' },
+    { key: 'Enter', description: 'Confirm action' },
+    { key: '?', description: 'Show this help' },
+  ];
+
+  // Calculate storage size
+  const calculateStorageSize = () => {
+    try {
+      const scrapersData = localStorage.getItem('web-scraper-scrapers') || '';
+      const resultsData = localStorage.getItem('web-scraper-results') || '';
+      const activitiesData = localStorage.getItem('web-scraper-activities') || '';
+      const settingsData = localStorage.getItem(STORAGE_KEY) || '';
+      const totalBytes = scrapersData.length + resultsData.length + activitiesData.length + settingsData.length;
+      if (totalBytes < 1024) return `${totalBytes} B`;
+      if (totalBytes < 1024 * 1024) return `${(totalBytes / 1024).toFixed(1)} KB`;
+      return `${(totalBytes / (1024 * 1024)).toFixed(2)} MB`;
+    } catch {
+      return 'Unknown';
+    }
+  };
 
   return (
     <div className="page-container" style={{ flex: 1, background: 'var(--bg-primary)' }}>
@@ -97,9 +171,9 @@ export const Settings: React.FC = () => {
           </div>
         </div>
 
-        {/* Export */}
+        {/* Data & Export */}
         <div className="settings-section">
-          <div className="settings-section-title">Export</div>
+          <div className="settings-section-title">Data & Export</div>
 
           <div className="settings-item">
             <div className="settings-item-info">
@@ -108,14 +182,108 @@ export const Settings: React.FC = () => {
             </div>
             <select
               className="form-select"
-              value={defaultExportFormat}
-              onChange={(e) => handleExportFormatChange(e.target.value as ExportFormat)}
+              value={settings.defaultExportFormat}
+              onChange={(e) => updateSettings({ defaultExportFormat: e.target.value as ExportFormat })}
               style={{ width: 140 }}
             >
               {exportOptions.map(opt => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <div className="settings-item-label">Include Metadata</div>
+              <div className="settings-item-description">Add timestamps and scraper info to exports</div>
+            </div>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={settings.includeMetadata}
+                onChange={(e) => updateSettings({ includeMetadata: e.target.checked })}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <div className="settings-item-label">Download Backup</div>
+              <div className="settings-item-description">Export all scrapers and results as JSON</div>
+            </div>
+            <button className="btn" onClick={handleExportBackup}>
+              Download Backup
+            </button>
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <div className="settings-item-label">Import Backup</div>
+              <div className="settings-item-description">Restore scrapers and results from backup</div>
+            </div>
+            <label className="btn" style={{ cursor: 'pointer' }}>
+              <input
+                type="file"
+                accept=".json"
+                onChange={handleImportBackup}
+                style={{ display: 'none' }}
+              />
+              Choose File
+            </label>
+          </div>
+        </div>
+
+        {/* Scraping Defaults */}
+        <div className="settings-section">
+          <div className="settings-section-title">Scraping Defaults</div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <div className="settings-item-label">Max Pages</div>
+              <div className="settings-item-description">Default maximum pages to scrape (0 = unlimited)</div>
+            </div>
+            <input
+              type="number"
+              className="form-input"
+              value={settings.maxPages}
+              onChange={(e) => updateSettings({ maxPages: Math.max(0, parseInt(e.target.value) || 0) })}
+              min={0}
+              max={1000}
+              style={{ width: 80 }}
+            />
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <div className="settings-item-label">Delay Between Pages</div>
+              <div className="settings-item-description">Milliseconds to wait between page loads</div>
+            </div>
+            <input
+              type="number"
+              className="form-input"
+              value={settings.delayBetweenPages}
+              onChange={(e) => updateSettings({ delayBetweenPages: Math.max(0, parseInt(e.target.value) || 0) })}
+              min={0}
+              max={10000}
+              step={100}
+              style={{ width: 100 }}
+            />
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <div className="settings-item-label">Auto-save Results</div>
+              <div className="settings-item-description">Automatically save results after scraping</div>
+            </div>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={settings.autoSaveResults}
+                onChange={(e) => updateSettings({ autoSaveResults: e.target.checked })}
+              />
+              <span className="toggle-slider"></span>
+            </label>
           </div>
         </div>
 
@@ -127,17 +295,23 @@ export const Settings: React.FC = () => {
             <div className="settings-item-info">
               <div className="settings-item-label">Storage Used</div>
               <div className="settings-item-description">
-                {savedScrapers.length} scrapers, {savedResults.length} results
+                {savedScrapers.length} scrapers, {savedResults.length} results, {totalScrapedItems.toLocaleString()} items
               </div>
             </div>
+            <span style={{ color: 'var(--text-secondary)', fontSize: 14 }}>{calculateStorageSize()}</span>
           </div>
+        </div>
+
+        {/* Danger Zone */}
+        <div className="settings-section danger-zone">
+          <div className="settings-section-title" style={{ color: 'var(--danger)' }}>Danger Zone</div>
 
           <div className="settings-item">
             <div className="settings-item-info">
               <div className="settings-item-label">Clear Results</div>
               <div className="settings-item-description">Delete all scraped results (keeps scrapers)</div>
             </div>
-            <button className="btn btn-danger" onClick={handleClearResults}>
+            <button className="btn btn-danger" onClick={() => setConfirmAction('clearResults')}>
               Clear Results
             </button>
           </div>
@@ -145,10 +319,10 @@ export const Settings: React.FC = () => {
           <div className="settings-item">
             <div className="settings-item-info">
               <div className="settings-item-label">Clear All Data</div>
-              <div className="settings-item-description">Delete all scrapers and results</div>
+              <div className="settings-item-description">Delete all scrapers, results, and settings</div>
             </div>
-            <button className="btn btn-danger" onClick={handleClearAllData}>
-              Clear All
+            <button className="btn btn-danger" onClick={() => setConfirmAction('clearAll')}>
+              Clear All Data
             </button>
           </div>
         </div>
@@ -159,11 +333,21 @@ export const Settings: React.FC = () => {
 
           <div className="settings-item">
             <div className="settings-item-info">
-              <div className="settings-item-label">Web Scraper v2</div>
+              <div className="settings-item-label">Web Scraper</div>
               <div className="settings-item-description">
-                Visual web scraping tool with browser automation
+                Version 2.0.0 - Visual web scraping tool
               </div>
             </div>
+          </div>
+
+          <div className="settings-item">
+            <div className="settings-item-info">
+              <div className="settings-item-label">Keyboard Shortcuts</div>
+              <div className="settings-item-description">View available keyboard shortcuts</div>
+            </div>
+            <button className="btn" onClick={() => setShowShortcuts(true)}>
+              View Shortcuts
+            </button>
           </div>
 
           <div className="settings-item">
@@ -176,6 +360,48 @@ export const Settings: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Keyboard Shortcuts Modal */}
+      {showShortcuts && (
+        <div className="modal-overlay" onClick={() => setShowShortcuts(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 400 }}>
+            <div className="modal-header">
+              <h3 className="modal-title">Keyboard Shortcuts</h3>
+              <button className="modal-close" onClick={() => setShowShortcuts(false)}>&times;</button>
+            </div>
+            <div className="modal-body">
+              <div className="shortcuts-list">
+                {shortcuts.map((shortcut, index) => (
+                  <div key={index} className="shortcut-item">
+                    <kbd className="shortcut-key">{shortcut.key}</kbd>
+                    <span className="shortcut-desc">{shortcut.description}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm Clear Results */}
+      <ConfirmModal
+        isOpen={confirmAction === 'clearResults'}
+        title="Clear All Results?"
+        message={`This will permanently delete ${savedResults.length} results and ${totalScrapedItems.toLocaleString()} items. Your scrapers will be kept. This cannot be undone.`}
+        confirmLabel="Clear Results"
+        onConfirm={handleClearResults}
+        onCancel={() => setConfirmAction(null)}
+      />
+
+      {/* Confirm Clear All */}
+      <ConfirmModal
+        isOpen={confirmAction === 'clearAll'}
+        title="Clear All Data?"
+        message={`This will permanently delete ${savedScrapers.length} scrapers, ${savedResults.length} results, and all settings. This cannot be undone.`}
+        confirmLabel="Clear Everything"
+        onConfirm={handleClearAllData}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   );
 };
