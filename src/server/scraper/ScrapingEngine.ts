@@ -192,108 +192,191 @@ export class ScrapingEngine {
   }
 
   private async extractMultipleItems(selectors: AssignedSelector[]): Promise<ScrapedItem[]> {
-    // Find the selector that matches the most elements (likely the main content)
-    // and use that count to determine how many items we're scraping
+    // Find a common container for related elements - this is the ONLY reliable way
+    // to ensure title/price/etc from the same product are matched together
     const result = await this.cdp.send('Runtime.evaluate', {
       expression: `
         (function() {
           const selectors = ${JSON.stringify(selectors)};
 
-          // Find max count among all selectors
-          let maxCount = 0;
-          selectors.forEach(sel => {
-            const count = document.querySelectorAll(sel.selector.css).length;
-            if (count > maxCount) maxCount = count;
+          // Helper: Find the closest common ancestor of multiple elements
+          function findCommonAncestor(elements) {
+            if (elements.length === 0) return null;
+            if (elements.length === 1) return elements[0].parentElement;
+
+            // Get all ancestors of first element
+            const ancestors = [];
+            let el = elements[0];
+            while (el.parentElement) {
+              ancestors.push(el.parentElement);
+              el = el.parentElement;
+            }
+
+            // Find first common ancestor
+            for (const ancestor of ancestors) {
+              if (elements.every(e => ancestor.contains(e))) {
+                return ancestor;
+              }
+            }
+            return document.body;
+          }
+
+          // Helper: Find the item container pattern
+          function findItemContainers(selectors) {
+            // Debug: Log what selectors we're looking for
+            console.log('[ScrapingEngine] Looking for selectors:', selectors.map(s => s.selector.css));
+
+            // Get first element from each selector
+            const firstElements = selectors
+              .map(sel => {
+                const el = document.querySelector(sel.selector.css);
+                console.log('[ScrapingEngine] Selector "' + sel.selector.css + '" found:', el ? 'YES (' + (el.textContent || '').substring(0, 30) + ')' : 'NO');
+                return el;
+              })
+              .filter(el => el !== null);
+
+            console.log('[ScrapingEngine] Found ' + firstElements.length + ' elements from ' + selectors.length + ' selectors');
+
+            if (firstElements.length < 2) {
+              console.log('[ScrapingEngine] Need at least 2 selectors to detect container pattern');
+              return null;
+            }
+
+            // NEW APPROACH: Find the container by looking at the first element's ancestors
+            // and finding a repeating pattern
+            const firstEl = firstElements[0];
+
+            // Walk up the DOM to find a container that repeats
+            let container = firstEl.parentElement;
+            let containerSelector = null;
+            let allContainers = [];
+
+            while (container && container !== document.body) {
+              // Build a selector for this container
+              const tagName = container.tagName.toLowerCase();
+              const classes = container.className ? container.className.split(' ').filter(c => c && !c.includes('--')) : [];
+
+              // Try different selector strategies
+              const selectorStrategies = [];
+
+              // Strategy 1: tag + all classes
+              if (classes.length > 0) {
+                selectorStrategies.push(tagName + '.' + classes.join('.'));
+              }
+
+              // Strategy 2: tag + first class only
+              if (classes.length > 0) {
+                selectorStrategies.push(tagName + '.' + classes[0]);
+              }
+
+              // Strategy 3: just the tag
+              selectorStrategies.push(tagName);
+
+              for (const selector of selectorStrategies) {
+                const matches = document.querySelectorAll(selector);
+                console.log('[ScrapingEngine] Trying container selector "' + selector + '": ' + matches.length + ' matches');
+
+                // Check if all our target elements have a match within these containers
+                if (matches.length > 1 && matches.length < 200) { // reasonable number of product cards
+                  // Verify that each container has ALL of our selector elements (not just some)
+                  const containersWithAllElements = Array.from(matches).filter(c => {
+                    // Check that this container has ALL selectors, not just one
+                    return selectors.every(sel => c.querySelector(sel.selector.css));
+                  });
+
+                  console.log('[ScrapingEngine] Containers with ALL our elements: ' + containersWithAllElements.length);
+
+                  if (containersWithAllElements.length > 1) {
+                    containerSelector = selector;
+                    allContainers = containersWithAllElements;
+                    console.log('[ScrapingEngine] Found good container pattern: ' + selector);
+                    break;
+                  }
+                }
+              }
+
+              if (containerSelector) break;
+              container = container.parentElement;
+            }
+
+            if (!containerSelector || allContainers.length === 0) {
+              console.log('[ScrapingEngine] Could not find repeating container pattern');
+              return null;
+            }
+
+            return { containers: allContainers, selector: containerSelector };
+          }
+
+          // Find container pattern
+          const containerInfo = findItemContainers(selectors);
+
+          if (!containerInfo || containerInfo.containers.length === 0) {
+            console.error('[ScrapingEngine] ERROR: Could not detect item container pattern.');
+            console.error('[ScrapingEngine] Make sure you select elements that are inside the same product card.');
+            console.error('[ScrapingEngine] For example: select a title AND price from the SAME product.');
+            return { error: 'NO_CONTAINER_DETECTED', items: [] };
+          }
+
+          console.log('[ScrapingEngine] Auto-detected container: ' + containerInfo.selector);
+          console.log('[ScrapingEngine] Found ' + containerInfo.containers.length + ' item containers');
+
+          const items = [];
+          containerInfo.containers.forEach(container => {
+            const item = {};
+            let hasAnyValue = false;
+
+            selectors.forEach(sel => {
+              // Try to find element within this container
+              const el = container.querySelector(sel.selector.css) ||
+                         // Fallback: try relative selector (last part of CSS)
+                         container.querySelector(sel.selector.css.split(' ').pop());
+
+              if (!el) {
+                item[sel.customName || sel.role] = null;
+                return;
+              }
+
+              hasAnyValue = true;
+              let value = null;
+              switch (sel.extractionType) {
+                case 'text':
+                  value = el.textContent?.trim() || null;
+                  break;
+                case 'href':
+                  value = el.getAttribute('href');
+                  if (value && !value.startsWith('http')) {
+                    value = new URL(value, window.location.origin).href;
+                  }
+                  break;
+                case 'src':
+                  value = el.getAttribute('src');
+                  if (value && !value.startsWith('http')) {
+                    value = new URL(value, window.location.origin).href;
+                  }
+                  break;
+                case 'attribute':
+                  value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
+                  break;
+                case 'innerHTML':
+                  value = el.innerHTML;
+                  break;
+                default:
+                  value = el.textContent?.trim() || null;
+              }
+              item[sel.customName || sel.role] = value;
+            });
+
+            // Only add items that have at least one value
+            if (hasAnyValue) {
+              items.push(item);
+            }
           });
 
-          // If only one element, return single item
-          if (maxCount <= 1) {
-            const item = {};
-            selectors.forEach(sel => {
-              const el = document.querySelector(sel.selector.css);
-              if (!el) {
-                item[sel.customName || sel.role] = null;
-                return;
-              }
-
-              let value = null;
-              switch (sel.extractionType) {
-                case 'text':
-                  value = el.textContent?.trim() || null;
-                  break;
-                case 'href':
-                  value = el.getAttribute('href');
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'src':
-                  value = el.getAttribute('src');
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'attribute':
-                  value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
-                  break;
-                case 'innerHTML':
-                  value = el.innerHTML;
-                  break;
-                default:
-                  value = el.textContent?.trim() || null;
-              }
-              item[sel.customName || sel.role] = value;
-            });
-            return [item];
-          }
-
-          // Multiple elements - extract all
-          const items = [];
-          for (let i = 0; i < maxCount; i++) {
-            const item = {};
-
-            selectors.forEach(sel => {
-              const elements = document.querySelectorAll(sel.selector.css);
-              const el = elements[i]; // Get the i-th element
-
-              if (!el) {
-                item[sel.customName || sel.role] = null;
-                return;
-              }
-
-              let value = null;
-              switch (sel.extractionType) {
-                case 'text':
-                  value = el.textContent?.trim() || null;
-                  break;
-                case 'href':
-                  value = el.getAttribute('href');
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'src':
-                  value = el.getAttribute('src');
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'attribute':
-                  value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
-                  break;
-                case 'innerHTML':
-                  value = el.innerHTML;
-                  break;
-                default:
-                  value = el.textContent?.trim() || null;
-              }
-              item[sel.customName || sel.role] = value;
-            });
-
-            items.push(item);
-          }
-
-          return items;
+          return {
+            containerSelector: containerInfo.selector,
+            containerCount: containerInfo.containers.length,
+            items: items
+          };
         })()
       `,
       returnByValue: true,
@@ -304,7 +387,26 @@ export class ScrapingEngine {
       throw new Error(result.exceptionDetails.text || 'Extraction failed');
     }
 
-    return result.result.value as ScrapedItem[];
+    const extractionResult = result.result.value as {
+      error?: string;
+      containerSelector?: string;
+      containerCount?: number;
+      items: ScrapedItem[]
+    };
+
+    // Log container detection info
+    if (extractionResult.error === 'NO_CONTAINER_DETECTED') {
+      console.error('[ScrapingEngine] Failed to detect item container pattern');
+      console.error('[ScrapingEngine] Tip: Select elements from within the same product card (e.g., title + price from same item)');
+      return [];
+    }
+
+    if (extractionResult.containerSelector) {
+      console.log(`[ScrapingEngine] Using auto-detected container: ${extractionResult.containerSelector}`);
+      console.log(`[ScrapingEngine] Extracting from ${extractionResult.containerCount} items`);
+    }
+
+    return extractionResult.items;
   }
 
   // =========================================================================
@@ -633,35 +735,42 @@ export class ScrapingEngine {
     for (const action of actions) {
       console.log(`[ScrapingEngine] Pre-action: ${action.type} on ${action.selector}`);
 
-      // Check if element exists first
-      const exists = await this.page
-        .waitForSelector(action.selector, { timeout: 3000, state: 'visible' })
-        .then(() => true)
-        .catch(() => false);
+      try {
+        // Check if element exists first
+        const exists = await this.page
+          .waitForSelector(action.selector, { timeout: 3000, state: 'visible' })
+          .then(() => true)
+          .catch(() => false);
 
-      if (!exists) {
-        console.log(`[ScrapingEngine] Pre-action element not found, skipping: ${action.selector}`);
-        continue; // Skip if not found (popup might not appear)
+        if (!exists) {
+          console.log(`[ScrapingEngine] Pre-action element not found, skipping: ${action.selector}`);
+          continue; // Skip if not found (popup might not appear)
+        }
+
+        switch (action.type) {
+          case 'click':
+            await this.page.click(action.selector, { timeout: 3000 });
+            break;
+          case 'type':
+            if (action.value) {
+              await this.page.fill(action.selector, action.value, { timeout: 3000 });
+            }
+            break;
+          case 'select':
+            if (action.value) {
+              await this.page.selectOption(action.selector, action.value, { timeout: 3000 });
+            }
+            break;
+        }
+
+        // Small delay between pre-actions
+        await new Promise((r) => setTimeout(r, 200));
+      } catch (error) {
+        // Pre-actions are optional (e.g., cookie popups may not always appear)
+        // Log and continue instead of failing the entire scrape
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.log(`[ScrapingEngine] Pre-action failed (non-fatal), continuing: ${errorMessage}`);
       }
-
-      switch (action.type) {
-        case 'click':
-          await this.page.click(action.selector, { timeout: 3000 });
-          break;
-        case 'type':
-          if (action.value) {
-            await this.page.fill(action.selector, action.value, { timeout: 3000 });
-          }
-          break;
-        case 'select':
-          if (action.value) {
-            await this.page.selectOption(action.selector, action.value, { timeout: 3000 });
-          }
-          break;
-      }
-
-      // Small delay between pre-actions
-      await new Promise((r) => setTimeout(r, 200));
     }
   }
 

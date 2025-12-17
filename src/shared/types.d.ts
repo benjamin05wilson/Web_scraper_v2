@@ -168,4 +168,28 @@ export interface GPUConfig {
     enableHardwareOverlays: boolean;
     forceDeviceScaleFactor?: number;
 }
+export interface SavedScraper {
+    id: string;
+    name: string;
+    config: ScraperConfig;
+    createdAt: number;
+    updatedAt: number;
+    lastRunAt?: number;
+}
+export interface SavedScrapeResult {
+    id: string;
+    scraperId: string;
+    scraperName: string;
+    result: ScrapeResult;
+    createdAt: number;
+    url: string;
+}
+export type ThemeMode = 'light' | 'dark' | 'system';
+export type ExportFormat = 'json' | 'csv' | 'xlsx';
+export interface AppSettings {
+    theme: ThemeMode;
+    sidebarWidth: number;
+    defaultExportFormat: ExportFormat;
+}
+export type ExtendedSelectorRole = 'title' | 'price' | 'url' | 'nextPage' | 'image' | 'description' | 'rating' | 'sku' | 'availability' | 'category' | 'custom';
 //# sourceMappingURL=types.d.ts.map

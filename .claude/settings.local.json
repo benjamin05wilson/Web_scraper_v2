@@ -8,7 +8,10 @@
       "Bash(powershell.exe -Command \"Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Seconds 2; Write-Host ''Node processes killed''\")",
       "Bash(npx tsx:*)",
       "Bash(npx tsc:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(dir:*)",
+      "Bash(npm run build:*)",
+      "Bash(npx vite build)"
     ]
   }
 }

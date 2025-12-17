@@ -234,3 +234,49 @@ export interface GPUConfig {
   enableHardwareOverlays: boolean;
   forceDeviceScaleFactor?: number;
 }
+
+// ============================================================================
+// SAVED DATA TYPES - For localStorage persistence
+// ============================================================================
+
+export interface SavedScraper {
+  id: string;
+  name: string;
+  config: ScraperConfig;
+  createdAt: number;
+  updatedAt: number;
+  lastRunAt?: number;
+}
+
+export interface SavedScrapeResult {
+  id: string;
+  scraperId: string;
+  scraperName: string;
+  result: ScrapeResult;
+  createdAt: number;
+  url: string;
+}
+
+// App Settings
+export type ThemeMode = 'light' | 'dark' | 'system';
+export type ExportFormat = 'json' | 'csv' | 'xlsx';
+
+export interface AppSettings {
+  theme: ThemeMode;
+  sidebarWidth: number;
+  defaultExportFormat: ExportFormat;
+}
+
+// Extended selector roles
+export type ExtendedSelectorRole =
+  | 'title'
+  | 'price'
+  | 'url'
+  | 'nextPage'
+  | 'image'
+  | 'description'
+  | 'rating'
+  | 'sku'
+  | 'availability'
+  | 'category'
+  | 'custom';

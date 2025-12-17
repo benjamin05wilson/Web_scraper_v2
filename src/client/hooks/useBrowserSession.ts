@@ -49,6 +49,7 @@ interface UseBrowserSessionReturn {
   assignedSelectors: AssignedSelector[];
   assignSelector: (role: SelectorRole, element: ElementSelector, extractionType?: string) => void;
   removeSelector: (role: SelectorRole) => void;
+  loadSelectors: (selectors: AssignedSelector[]) => void;
   testSelector: (selector: string) => void;
   selectorTestResult: { valid: boolean; count: number; error?: string } | null;
 
@@ -57,6 +58,7 @@ interface UseBrowserSessionReturn {
   recordedActions: RecorderAction[];
   startRecording: (name: string) => void;
   stopRecording: () => void;
+  loadRecordedActions: (actions: RecorderAction[]) => void;
   currentSequence: RecorderSequence | null;
 
   // Scraping
@@ -301,6 +303,11 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     setAssignedSelectors((prev) => prev.filter((s) => s.role !== role));
   }, []);
 
+  // Load selectors (for loading saved scraper config)
+  const loadSelectors = useCallback((selectors: AssignedSelector[]) => {
+    setAssignedSelectors(selectors);
+  }, []);
+
   // Test selector
   const testSelector = useCallback(
     (selector: string) => {
@@ -325,6 +332,11 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     if (!sessionId) return;
     send('recorder:stop', {}, sessionId);
   }, [sessionId, send]);
+
+  // Load recorded actions (for loading saved scraper config)
+  const loadRecordedActions = useCallback((actions: RecorderAction[]) => {
+    setRecordedActions(actions);
+  }, []);
 
   // Execute scrape
   const executeScrape = useCallback(() => {
@@ -359,6 +371,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     assignedSelectors,
     assignSelector,
     removeSelector,
+    loadSelectors,
     testSelector,
     selectorTestResult,
 
@@ -366,6 +379,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     recordedActions,
     startRecording,
     stopRecording,
+    loadRecordedActions,
     currentSequence,
 
     scraperConfig,

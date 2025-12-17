@@ -13,6 +13,7 @@ interface BrowserViewProps {
   hoveredElement: ElementSelector | null;
   selectionMode: boolean;
   subscribe: (type: any, handler: (msg: any) => void) => () => void;
+  viewport: { width: number; height: number };
 }
 
 export const BrowserView: React.FC<BrowserViewProps> = ({
@@ -23,12 +24,19 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
   hoveredElement,
   selectionMode,
   subscribe,
+  viewport,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
 
-  const [dimensions, setDimensions] = useState({ width: 1280, height: 720 });
+  // Use viewport prop as the source of truth for dimensions
+  const [dimensions, setDimensions] = useState(viewport);
+
+  // Update dimensions when viewport changes
+  useEffect(() => {
+    setDimensions(viewport);
+  }, [viewport]);
 
   // Initialize canvas context
   useEffect(() => {
