@@ -127,6 +127,35 @@ export class ScrapingEngine {
     const result = await this.cdp.send('Runtime.evaluate', {
       expression: `
         (function() {
+          // Helper: Extract the lowest/first price from an element containing multiple prices
+          function extractPrice(el) {
+            const text = el.textContent || '';
+            // Match price patterns: £25.45, $99.99, €19,99, 25.45, etc.
+            const priceRegex = /[£$€¥₹]?\\s*\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?|\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?\\s*[£$€¥₹]?/g;
+            const matches = text.match(priceRegex);
+
+            if (!matches || matches.length === 0) {
+              return text.trim(); // Fallback to full text if no price found
+            }
+
+            // Parse all prices and find the lowest
+            const prices = matches
+              .map(m => {
+                // Extract just the number, handling different formats
+                const cleaned = m.replace(/[£$€¥₹\\s]/g, '').replace(/,/g, '');
+                return { original: m.trim(), value: parseFloat(cleaned) };
+              })
+              .filter(p => !isNaN(p.value) && p.value > 0);
+
+            if (prices.length === 0) {
+              return matches[0].trim(); // Return first match if parsing fails
+            }
+
+            // Sort by value and return the lowest price (usually the sale/current price)
+            prices.sort((a, b) => a.value - b.value);
+            return prices[0].original;
+          }
+
           const containers = document.querySelectorAll(${JSON.stringify(containerSelector)});
           if (containers.length === 0) {
             throw new Error('No containers found for selector: ${containerSelector}');
@@ -148,7 +177,12 @@ export class ScrapingEngine {
               let value = null;
               switch (sel.extractionType) {
                 case 'text':
-                  value = el.textContent?.trim() || null;
+                  // Special handling for price - extract just the first/lowest price
+                  if (sel.role === 'price') {
+                    value = extractPrice(el);
+                  } else {
+                    value = el.textContent?.trim() || null;
+                  }
                   break;
                 case 'href':
                   value = el.getAttribute('href') || null;
@@ -198,6 +232,35 @@ export class ScrapingEngine {
       expression: `
         (function() {
           const selectors = ${JSON.stringify(selectors)};
+
+          // Helper: Extract the lowest/first price from an element containing multiple prices
+          function extractPrice(el) {
+            const text = el.textContent || '';
+            // Match price patterns: £25.45, $99.99, €19,99, 25.45, etc.
+            const priceRegex = /[£$€¥₹]?\\s*\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?|\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?\\s*[£$€¥₹]?/g;
+            const matches = text.match(priceRegex);
+
+            if (!matches || matches.length === 0) {
+              return text.trim(); // Fallback to full text if no price found
+            }
+
+            // Parse all prices and find the lowest
+            const prices = matches
+              .map(m => {
+                // Extract just the number, handling different formats
+                const cleaned = m.replace(/[£$€¥₹\\s]/g, '').replace(/,/g, '');
+                return { original: m.trim(), value: parseFloat(cleaned) };
+              })
+              .filter(p => !isNaN(p.value) && p.value > 0);
+
+            if (prices.length === 0) {
+              return matches[0].trim(); // Return first match if parsing fails
+            }
+
+            // Sort by value and return the lowest price (usually the sale/current price)
+            prices.sort((a, b) => a.value - b.value);
+            return prices[0].original;
+          }
 
           // Helper: Find the closest common ancestor of multiple elements
           function findCommonAncestor(elements) {
@@ -340,7 +403,12 @@ export class ScrapingEngine {
               let value = null;
               switch (sel.extractionType) {
                 case 'text':
-                  value = el.textContent?.trim() || null;
+                  // Special handling for price - extract just the first/lowest price
+                  if (sel.role === 'price') {
+                    value = extractPrice(el);
+                  } else {
+                    value = el.textContent?.trim() || null;
+                  }
                   break;
                 case 'href':
                   value = el.getAttribute('href');
@@ -361,7 +429,12 @@ export class ScrapingEngine {
                   value = el.innerHTML;
                   break;
                 default:
-                  value = el.textContent?.trim() || null;
+                  // Also check for price in default case
+                  if (sel.role === 'price') {
+                    value = extractPrice(el);
+                  } else {
+                    value = el.textContent?.trim() || null;
+                  }
               }
               item[sel.customName || sel.role] = value;
             });
