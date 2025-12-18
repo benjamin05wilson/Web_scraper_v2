@@ -977,12 +977,14 @@ export class ScrapingEngine {
   }
 
   private async autoScrollToLoadContent(selectors: AssignedSelector[]): Promise<void> {
-    const slowScrollDelay = 1000; // Ms between scrolls - VERY SLOW for lazy load
-    const scrollStepSize = 250; // Pixels to scroll each step (small for slow scrolling)
-    const loadingWaitTimeout = 3000; // Max ms to wait for loading indicator to disappear
-    const maxCycles = 10; // Max number of bottom-up cycles to prevent infinite loops
+    const scrollDelay = 800; // Ms between scroll steps
+    const slowScrollDelay = 1000; // Ms for slow scroll-up
+    const scrollStepSize = 300; // Pixels per scroll step
+    const loadingWaitTimeout = 3000; // Max ms to wait for loading indicator
+    const maxIterations = 100; // Max scroll iterations to prevent infinite loops
+    const noChangeThreshold = 3; // How many times at bottom with no change before giving up
 
-    console.log('[ScrapingEngine] Auto-scroll: starting lazy load detection (cyclic bottom-up strategy)...');
+    console.log('[ScrapingEngine] Auto-scroll: starting lazy load detection...');
 
     // First, try to disable lazy loading mechanisms
     await this.disableLazyLoading();
@@ -999,127 +1001,155 @@ export class ScrapingEngine {
       }, selectors);
     };
 
-    // Helper to scroll to bottom and wait for page to expand
-    const scrollToBottomAndWait = async (): Promise<number> => {
-      let pageHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
-      let previousHeight = 0;
-      let heightStableCount = 0;
-
-      while (heightStableCount < 3) {
-        await this.page.evaluate(() => {
-          window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
-        });
-
-        await this.triggerLazyLoadEvents();
-        await new Promise((r) => setTimeout(r, 800));
-        await this.waitForLoadingToComplete(loadingWaitTimeout);
-
-        const newHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
-
-        if (newHeight === previousHeight) {
-          heightStableCount++;
-        } else {
-          heightStableCount = 0;
-          console.log(`[ScrapingEngine] Page expanded to ${newHeight}px`);
-        }
-
-        previousHeight = newHeight;
-        pageHeight = newHeight;
-      }
-
-      return pageHeight;
+    // Helper to get page metrics
+    const getPageMetrics = async () => {
+      return await this.page.evaluate(() => ({
+        scrollHeight: document.documentElement.scrollHeight,
+        scrollTop: window.scrollY,
+        clientHeight: document.documentElement.clientHeight,
+      }));
     };
 
-    // Helper to slowly scroll up and detect new elements - STOPS IMMEDIATELY when new products found
-    const slowScrollUp = async (pageHeight: number, startCount: number): Promise<{ newCount: number; foundNew: boolean }> => {
-      let currentPosition = pageHeight;
-      let lastCount = startCount;
-
-      console.log(`[ScrapingEngine] Slowly scrolling up from ${pageHeight}px...`);
-
-      while (currentPosition > 0) {
-        // Scroll up by small increment
-        currentPosition = Math.max(0, currentPosition - scrollStepSize);
-
-        await this.page.evaluate((pos) => {
-          window.scrollTo({ top: pos, behavior: 'smooth' });
-        }, currentPosition);
-
-        // Wait for smooth scroll to complete - SLOW
-        await new Promise((r) => setTimeout(r, slowScrollDelay));
-
-        // Trigger lazy load events
-        await this.triggerLazyLoadEvents();
-
-        // Wait for any loading
-        await this.waitForLoadingToComplete(loadingWaitTimeout);
-
-        // Check element count
-        const currentCount = await getElementCount();
-
-        if (currentCount > lastCount) {
-          console.log(`[ScrapingEngine] NEW PRODUCTS LOADED! ${currentCount} elements (was ${lastCount}) at ${currentPosition}px`);
-          console.log(`[ScrapingEngine] Stopping scroll-up immediately, will go back to bottom...`);
-          // Return immediately - don't continue scrolling up
-          return { newCount: currentCount, foundNew: true };
-        }
-
-        // Log progress every 5 steps
-        if (Math.floor(currentPosition / scrollStepSize) % 5 === 0 && currentPosition > 0) {
-          console.log(`[ScrapingEngine] Scroll position: ${currentPosition}px, elements: ${lastCount}`);
-        }
-      }
-
-      // Reached top without finding new elements
-      return { newCount: lastCount, foundNew: false };
-    };
-
-    // Get initial element count
+    // Get initial state
     let totalElementCount = await getElementCount();
+    const initialCount = totalElementCount;
     console.log(`[ScrapingEngine] Initial element count: ${totalElementCount}`);
 
-    // Main cycle: scroll to bottom -> scroll up slowly -> if new elements found, repeat
-    let cycleCount = 0;
-    let keepGoing = true;
+    // =========================================================================
+    // STRATEGY 1: Jump to bottom repeatedly until nothing loads
+    // Works for most sites (Zara, Amazon, typical infinite scroll)
+    // =========================================================================
+    console.log('[ScrapingEngine] Strategy 1: Scroll to bottom to load content...');
 
-    while (keepGoing && cycleCount < maxCycles) {
-      cycleCount++;
-      console.log(`[ScrapingEngine] === CYCLE ${cycleCount}/${maxCycles} ===`);
+    let iteration = 0;
+    let noChangeAtBottomCount = 0;
+    let scrollDownLoadedContent = false;
 
-      // Step 1: Scroll to bottom and wait for page to fully expand
-      console.log('[ScrapingEngine] Step 1: Scrolling to bottom...');
-      const pageHeight = await scrollToBottomAndWait();
-      console.log(`[ScrapingEngine] Page height: ${pageHeight}px`);
+    while (iteration < maxIterations && noChangeAtBottomCount < noChangeThreshold) {
+      iteration++;
+      const beforeCount = totalElementCount;
+      const beforeHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
 
-      // Check if we got new elements just from scrolling down
-      const afterBottomCount = await getElementCount();
-      if (afterBottomCount > totalElementCount) {
-        console.log(`[ScrapingEngine] Found ${afterBottomCount - totalElementCount} new elements after scrolling to bottom`);
-        totalElementCount = afterBottomCount;
-      }
+      // Jump straight to bottom (fast)
+      await this.page.evaluate(() => {
+        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+      });
+      await new Promise((r) => setTimeout(r, scrollDelay));
+      await this.triggerLazyLoadEvents();
+      await this.waitForLoadingToComplete(loadingWaitTimeout);
 
-      // Step 2: Slowly scroll up
-      console.log('[ScrapingEngine] Step 2: Slowly scrolling up...');
-      const { newCount, foundNew } = await slowScrollUp(pageHeight, totalElementCount);
+      // Check for new elements
+      const afterCount = await getElementCount();
+      const afterHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
 
-      if (newCount > totalElementCount) {
-        console.log(`[ScrapingEngine] Cycle ${cycleCount} found ${newCount - totalElementCount} new elements!`);
-        totalElementCount = newCount;
-      }
-
-      // If we found new elements during scroll up, do another cycle
-      if (foundNew) {
-        console.log('[ScrapingEngine] New elements detected during scroll-up, will repeat cycle...');
-        // Small pause before next cycle
-        await new Promise((r) => setTimeout(r, 500));
+      if (afterCount > beforeCount) {
+        console.log(`[ScrapingEngine] Loaded ${afterCount - beforeCount} new elements (total: ${afterCount})`);
+        totalElementCount = afterCount;
+        noChangeAtBottomCount = 0; // Reset counter since we found new content
+        scrollDownLoadedContent = true;
+      } else if (afterHeight > beforeHeight) {
+        // Page expanded but no new elements yet - keep going
+        console.log(`[ScrapingEngine] Page expanded: ${beforeHeight}px -> ${afterHeight}px`);
+        noChangeAtBottomCount = 0;
       } else {
-        console.log('[ScrapingEngine] No new elements found during scroll-up, finishing...');
-        keepGoing = false;
+        // At bottom with no new content and no expansion
+        noChangeAtBottomCount++;
+        console.log(`[ScrapingEngine] At bottom, no new content (${noChangeAtBottomCount}/${noChangeThreshold})`);
+      }
+
+      // Log progress periodically
+      if (iteration % 5 === 0) {
+        console.log(`[ScrapingEngine] Progress: iteration ${iteration}, ${totalElementCount} elements`);
       }
     }
 
-    if (cycleCount >= maxCycles) {
-      console.log(`[ScrapingEngine] Reached max cycles (${maxCycles}), stopping`);
+    const afterStrategy1Count = totalElementCount;
+    console.log(`[ScrapingEngine] Strategy 1 complete: ${totalElementCount} elements (${totalElementCount - initialCount} new)`);
+
+    // =========================================================================
+    // STRATEGY 2: Try scroll-up to find more content
+    // Many sites only load content when scrolling up from the bottom
+    // But if Strategy 1 worked well, we bail out early if scroll-up finds nothing
+    // =========================================================================
+    const earlyBailIterations = 5; // If no new content after this many iterations, stop
+    console.log('[ScrapingEngine] Strategy 2: Trying scroll-up to find more content...');
+    {
+      // We're already at bottom from Strategy 1, now slowly scroll up
+      iteration = 0;
+      noChangeAtBottomCount = 0;
+      let scrollUpLoadedContent = false;
+      let iterationsWithoutNewContent = 0;
+
+      while (iteration < maxIterations && noChangeAtBottomCount < noChangeThreshold) {
+        iteration++;
+        const beforeCount = totalElementCount;
+        const metrics = await getPageMetrics();
+
+        // EARLY BAIL: If scroll-up hasn't found anything new after a few iterations, stop
+        // This prevents wasting time when Strategy 1 already worked
+        if (iterationsWithoutNewContent >= earlyBailIterations && !scrollUpLoadedContent) {
+          console.log(`[ScrapingEngine] Scroll-up found nothing after ${earlyBailIterations} iterations, skipping rest`);
+          break;
+        }
+
+        // Check if we're at the top
+        if (metrics.scrollTop <= 50) {
+          if (scrollUpLoadedContent) {
+            // Found content during scroll-up, go back to bottom and try scroll-up again
+            console.log('[ScrapingEngine] Reached top, going back to bottom...');
+            await this.page.evaluate(() => {
+              window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+            });
+            await new Promise((r) => setTimeout(r, 500));
+            scrollUpLoadedContent = false; // Reset for next cycle
+            iterationsWithoutNewContent = 0; // Reset early bail counter too
+          } else {
+            // Reached top without finding anything new
+            noChangeAtBottomCount++;
+            console.log(`[ScrapingEngine] At top, no new content (${noChangeAtBottomCount}/${noChangeThreshold})`);
+            // Go back to bottom to try again
+            await this.page.evaluate(() => {
+              window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+            });
+            await new Promise((r) => setTimeout(r, 500));
+          }
+          continue;
+        }
+
+        // Scroll up slowly
+        await this.page.evaluate((step) => {
+          window.scrollTo({ top: Math.max(0, window.scrollY - step), behavior: 'smooth' });
+        }, scrollStepSize);
+        await new Promise((r) => setTimeout(r, slowScrollDelay));
+        await this.triggerLazyLoadEvents();
+        await this.waitForLoadingToComplete(loadingWaitTimeout);
+
+        // Check for new elements
+        const afterCount = await getElementCount();
+        if (afterCount > beforeCount) {
+          console.log(`[ScrapingEngine] Scroll-up loaded ${afterCount - beforeCount} new elements (total: ${afterCount})`);
+          totalElementCount = afterCount;
+          noChangeAtBottomCount = 0;
+          scrollUpLoadedContent = true;
+          iterationsWithoutNewContent = 0; // Reset early bail counter
+
+          // Immediately go back to bottom when we find new content
+          console.log('[ScrapingEngine] New content found, going back to bottom...');
+          await this.page.evaluate(() => {
+            window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+          });
+          await new Promise((r) => setTimeout(r, 500));
+        } else {
+          iterationsWithoutNewContent++;
+        }
+
+        // Log progress periodically
+        if (iteration % 10 === 0) {
+          console.log(`[ScrapingEngine] Strategy 2 progress: iteration ${iteration}, ${totalElementCount} elements`);
+        }
+      }
+
+      console.log(`[ScrapingEngine] Strategy 2 complete: ${totalElementCount} elements (${totalElementCount - afterStrategy1Count} new from scroll-up)`);
     }
 
     // Final wait for any remaining loading
@@ -1131,7 +1161,7 @@ export class ScrapingEngine {
     });
     await new Promise((r) => setTimeout(r, 300));
 
-    console.log(`[ScrapingEngine] Auto-scroll finished after ${cycleCount} cycles: ${totalElementCount} total elements found`);
+    console.log(`[ScrapingEngine] Auto-scroll complete: ${totalElementCount} total elements (${totalElementCount - initialCount} loaded via scroll)`);
   }
 
   // Wait for loading indicators to disappear
