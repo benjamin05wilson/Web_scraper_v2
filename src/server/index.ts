@@ -39,6 +39,10 @@ interface ActiveSession {
   webrtc: WebRTCManager;
   selectionMode: boolean;
   recordingMode: boolean;
+  urlCaptureMode: boolean;
+  capturedUrls: Array<{ url: string; text?: string; title?: string; timestamp: number }>;
+  lastHoveredUrl: string | null;
+  lastUrlCheckTime: number;
 }
 
 const sessions = new Map<string, ActiveSession>();
@@ -154,14 +158,26 @@ async function handleMessage(
           send(ws, 'recorder:action', { action }, newSessionId);
         });
 
+        // Set up URL capture callback
+        inspector.setUrlHoverCallback((info) => {
+          send(ws, 'url:hover', info, newSessionId);
+        });
+
         // Inject scripts
         await inspector.inject();
+
+        // Enable URL capture by default
+        await inspector.enableUrlCapture();
 
         // Re-inject on navigation
         browserSession.page.on('domcontentloaded', async () => {
           await inspector.reinject();
           if (sessions.get(newSessionId)?.recordingMode) {
             await recorder.inject();
+          }
+          // Re-enable URL capture if it was enabled
+          if (sessions.get(newSessionId)?.urlCaptureMode) {
+            await inspector.enableUrlCapture();
           }
         });
 
@@ -175,6 +191,10 @@ async function handleMessage(
           webrtc,
           selectionMode: false,
           recordingMode: false,
+          urlCaptureMode: true,
+          capturedUrls: [],
+          lastHoveredUrl: null,
+          lastUrlCheckTime: 0,
         };
 
         sessions.set(newSessionId, session);
@@ -235,7 +255,24 @@ async function handleMessage(
         console.log(`[Server] Mouse ${event.type} at (${event.x}, ${event.y})`);
       }
       await browserManager.handleMouseEvent(session.id, event);
-      // Selection mode highlighting now happens on click only (in the injected script)
+
+      // Check for URL at mouse position (for URL capture feature)
+      // Throttle to max once per 100ms to avoid overloading
+      const now = Date.now();
+      if (session.urlCaptureMode && event.type === 'move' && now - session.lastUrlCheckTime > 100) {
+        session.lastUrlCheckTime = now;
+        try {
+          const linkInfo = await session.inspector.getLinkAtPoint(event.x, event.y);
+          const newUrl = linkInfo?.url || null;
+          // Only send if URL changed
+          if (newUrl !== session.lastHoveredUrl) {
+            session.lastHoveredUrl = newUrl;
+            send(ws, 'url:hover', linkInfo, session.id);
+          }
+        } catch {
+          // Ignore errors during URL detection
+        }
+      }
       break;
     }
 
@@ -438,6 +475,67 @@ async function handleMessage(
 
     case 'webrtc:ice': {
       // Handle ICE candidates if using full WebRTC
+      break;
+    }
+
+    // =========================================================================
+    // URL CAPTURE
+    // =========================================================================
+
+    case 'url:captured': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { url, text, title } = payload as { url: string; text?: string; title?: string };
+
+      // Add to captured URLs (avoid duplicates)
+      const exists = session.capturedUrls.some(u => u.url === url);
+      if (!exists) {
+        session.capturedUrls.push({
+          url,
+          text,
+          title,
+          timestamp: Date.now(),
+        });
+        console.log(`[Server] URL captured: ${url}`);
+
+        // Send updated history to client
+        send(ws, 'url:history', { urls: session.capturedUrls }, session.id);
+      }
+      break;
+    }
+
+    case 'url:history': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      // Send current URL history
+      send(ws, 'url:history', { urls: session.capturedUrls }, session.id);
+      break;
+    }
+
+    // =========================================================================
+    // CONTAINER EXTRACTION
+    // =========================================================================
+
+    case 'container:extract': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { selector } = payload as { selector: string };
+      console.log(`[Server] Extracting container content for: ${selector}`);
+
+      try {
+        const content = await session.inspector.extractContainerContent(selector);
+        send(ws, 'container:content', content, session.id);
+      } catch (error) {
+        console.error('[Server] Container extraction failed:', error);
+        send(ws, 'container:content', {
+          items: [],
+          containerSelector: selector,
+          error: error instanceof Error ? error.message : 'Extraction failed',
+        }, session.id);
+      }
       break;
     }
 

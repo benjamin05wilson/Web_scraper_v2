@@ -12,6 +12,10 @@ import type {
   RecorderSequence,
   ScraperConfig,
   ScrapeResult,
+  CapturedUrl,
+  UrlHoverPayload,
+  ExtractedContentItem,
+  ContainerContentPayload,
 } from '../../shared/types';
 
 interface UseBrowserSessionOptions {
@@ -47,8 +51,8 @@ interface UseBrowserSessionReturn {
 
   // Assigned Selectors
   assignedSelectors: AssignedSelector[];
-  assignSelector: (role: SelectorRole, element: ElementSelector, extractionType?: string) => void;
-  removeSelector: (role: SelectorRole) => void;
+  assignSelector: (role: SelectorRole, element: ElementSelector, extractionType?: string, priority?: number) => void;
+  removeSelector: (role: SelectorRole, priority?: number) => void;
   loadSelectors: (selectors: AssignedSelector[]) => void;
   testSelector: (selector: string) => void;
   selectorTestResult: { valid: boolean; count: number; error?: string } | null;
@@ -67,6 +71,16 @@ interface UseBrowserSessionReturn {
   executeScrape: () => void;
   scrapeResult: ScrapeResult | null;
   isScrapingRunning: boolean;
+
+  // URL Capture
+  hoveredUrl: UrlHoverPayload | null;
+  capturedUrls: CapturedUrl[];
+  captureUrl: (url: string, text?: string, title?: string) => void;
+  clearCapturedUrls: () => void;
+
+  // Container extraction
+  extractContainerContent: (selector: string) => void;
+  extractedContent: ExtractedContentItem[];
 }
 
 export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowserSessionReturn {
@@ -101,6 +115,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const [scraperConfig, setScraperConfig] = useState<ScraperConfig | null>(null);
   const [scrapeResult, setScrapeResult] = useState<ScrapeResult | null>(null);
   const [isScrapingRunning, setIsScrapingRunning] = useState(false);
+
+  // URL Capture state
+  const [hoveredUrl, setHoveredUrl] = useState<UrlHoverPayload | null>(null);
+  const [capturedUrls, setCapturedUrls] = useState<CapturedUrl[]>([]);
+
+  // Container extraction state
+  const [extractedContent, setExtractedContent] = useState<ExtractedContentItem[]>([]);
 
   // Subscribe to WebSocket messages
   useEffect(() => {
@@ -195,6 +216,29 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       })
     );
 
+    // URL hover
+    unsubscribes.push(
+      subscribe('url:hover', (msg) => {
+        setHoveredUrl(msg.payload);
+      })
+    );
+
+    // URL history update
+    unsubscribes.push(
+      subscribe('url:history', (msg) => {
+        setCapturedUrls(msg.payload.urls || []);
+      })
+    );
+
+    // Container content extraction result
+    unsubscribes.push(
+      subscribe('container:content', (msg) => {
+        const payload = msg.payload as ContainerContentPayload;
+        setExtractedContent(payload.items || []);
+        console.log('[Session] Container content extracted:', payload.items?.length || 0, 'items');
+      })
+    );
+
     return () => {
       unsubscribes.forEach((unsub) => unsub());
     };
@@ -278,18 +322,18 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     send('selector:clearHighlight', {}, sessionId);
   }, [sessionId, send]);
 
-  // Assign selector
+  // Assign selector - supports multiple selectors per role with priority (for fallbacks)
   const assignSelector = useCallback(
-    (role: SelectorRole, element: ElementSelector, extractionType: string = 'text') => {
+    (role: SelectorRole, element: ElementSelector, extractionType: string = 'text', priority: number = 0) => {
       setAssignedSelectors((prev) => {
-        // Remove existing selector for this role
-        const filtered = prev.filter((s) => s.role !== role);
+        // Add new selector, keeping existing ones for other roles or same role with different priority
         return [
-          ...filtered,
+          ...prev,
           {
             role,
             selector: element,
             extractionType: extractionType as AssignedSelector['extractionType'],
+            priority,
           },
         ];
       });
@@ -298,9 +342,16 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     []
   );
 
-  // Remove selector
-  const removeSelector = useCallback((role: SelectorRole) => {
-    setAssignedSelectors((prev) => prev.filter((s) => s.role !== role));
+  // Remove selector - if priority specified, remove only that one; otherwise remove all for role
+  const removeSelector = useCallback((role: SelectorRole, priority?: number) => {
+    setAssignedSelectors((prev) => {
+      if (priority !== undefined) {
+        // Remove specific priority for this role
+        return prev.filter((s) => !(s.role === role && s.priority === priority));
+      }
+      // Remove all selectors for this role
+      return prev.filter((s) => s.role !== role);
+    });
   }, []);
 
   // Load selectors (for loading saved scraper config)
@@ -347,6 +398,30 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     send('scrape:execute', scraperConfig, sessionId);
   }, [sessionId, scraperConfig, send]);
 
+  // Capture a URL (save to history)
+  const captureUrl = useCallback(
+    (url: string, text?: string, title?: string) => {
+      if (!sessionId) return;
+      send('url:captured', { url, text, title }, sessionId);
+    },
+    [sessionId, send]
+  );
+
+  // Clear captured URLs
+  const clearCapturedUrls = useCallback(() => {
+    setCapturedUrls([]);
+  }, []);
+
+  // Extract content from a container element
+  const extractContainerContent = useCallback(
+    (selector: string) => {
+      if (!sessionId) return;
+      setExtractedContent([]); // Clear previous
+      send('container:extract', { selector }, sessionId);
+    },
+    [sessionId, send]
+  );
+
   return {
     sessionId,
     sessionStatus,
@@ -387,5 +462,13 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     executeScrape,
     scrapeResult,
     isScrapingRunning,
+
+    hoveredUrl,
+    capturedUrls,
+    captureUrl,
+    clearCapturedUrls,
+
+    extractContainerContent,
+    extractedContent,
   };
 }

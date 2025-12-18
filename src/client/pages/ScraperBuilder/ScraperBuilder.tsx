@@ -29,6 +29,7 @@ export const ScraperBuilder: React.FC = () => {
   const mainContentRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ width: 1280, height: 720 });
   const [scraperName, setScraperName] = useState('My Scraper');
+  const [itemContainerSelector, setItemContainerSelector] = useState('');
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
 
@@ -96,6 +97,11 @@ export const ScraperBuilder: React.FC = () => {
     executeScrape,
     scrapeResult,
     isScrapingRunning,
+    hoveredUrl,
+    capturedUrls,
+    captureUrl,
+    extractContainerContent,
+    extractedContent,
   } = useBrowserSession({ send, subscribe, connected });
 
   // Load scraper config if editing existing
@@ -104,6 +110,10 @@ export const ScraperBuilder: React.FC = () => {
       const scraper = getScraperById(scraperId);
       if (scraper) {
         setScraperName(scraper.name);
+        // Load container selector from saved config
+        if (scraper.config.itemContainer) {
+          setItemContainerSelector(scraper.config.itemContainer);
+        }
         // Load selectors from saved config
         if (scraper.config.selectors && scraper.config.selectors.length > 0) {
           loadSelectors(scraper.config.selectors);
@@ -168,7 +178,7 @@ export const ScraperBuilder: React.FC = () => {
     if (lastSavedAt !== null) {
       setHasUnsavedChanges(true);
     }
-  }, [scraperName, assignedSelectors, recordedActions, currentUrl]);
+  }, [scraperName, assignedSelectors, recordedActions, currentUrl, itemContainerSelector]);
 
   // Handle saving scraper
   const handleSaveScraper = useCallback(() => {
@@ -176,6 +186,7 @@ export const ScraperBuilder: React.FC = () => {
       name: scraperName,
       startUrl: currentUrl || '',
       selectors: assignedSelectors,
+      itemContainer: itemContainerSelector || undefined,
       preActions: recordedActions.length > 0 ? {
         id: `seq-${Date.now()}`,
         name: 'Pre-actions',
@@ -194,7 +205,7 @@ export const ScraperBuilder: React.FC = () => {
 
     setHasUnsavedChanges(false);
     setLastSavedAt(Date.now());
-  }, [scraperName, currentUrl, assignedSelectors, recordedActions, scraperId, saveScraper, updateScraper, showToast]);
+  }, [scraperName, currentUrl, assignedSelectors, itemContainerSelector, recordedActions, scraperId, saveScraper, updateScraper, showToast]);
 
   // Handle scrape result - save to context
   useEffect(() => {
@@ -245,6 +256,10 @@ export const ScraperBuilder: React.FC = () => {
         onSaveScraper={handleSaveScraper}
         hasUnsavedChanges={hasUnsavedChanges}
         lastSavedAt={lastSavedAt}
+        itemContainerSelector={itemContainerSelector}
+        onContainerSelectorChange={setItemContainerSelector}
+        extractContainerContent={extractContainerContent}
+        extractedContent={extractedContent}
       />
 
       {/* Main content area */}
@@ -257,6 +272,9 @@ export const ScraperBuilder: React.FC = () => {
           onCreateSession={handleCreateSession}
           onDestroySession={destroySession}
           sessionId={sessionId}
+          hoveredUrl={hoveredUrl}
+          capturedUrls={capturedUrls}
+          onCaptureUrl={captureUrl}
         />
 
         {/* Browser view */}

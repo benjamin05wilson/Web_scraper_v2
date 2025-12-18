@@ -3,7 +3,7 @@
 // ============================================================================
 
 import type { Page, CDPSession } from 'playwright';
-import type { ElementSelector, DOMHighlight } from '../../shared/types.js';
+import type { ElementSelector, DOMHighlight, UrlHoverPayload, ContainerContentPayload, ExtractedContentItem } from '../../shared/types.js';
 
 // Script injected into the page for DOM inspection
 const DOM_INSPECTION_SCRIPT = `
@@ -16,6 +16,8 @@ const DOM_INSPECTION_SCRIPT = `
   let highlightElement = null;
   let lastHoveredElement = null;
   let isSelectionMode = false;
+  let lastHoveredUrl = null;
+  let urlCaptureEnabled = true;
 
   // Create highlight overlay
   function createHighlight() {
@@ -329,6 +331,60 @@ const DOM_INSPECTION_SCRIPT = `
     ) || null;
   }
 
+  // Find the closest link element from an element
+  function findLinkFromElement(el) {
+    let current = el;
+    while (current && current !== document.body) {
+      if (current.tagName === 'A' && current.href) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  // Get link info for URL capture
+  function getLinkInfo(linkEl) {
+    if (!linkEl || !linkEl.href) return null;
+
+    // Skip javascript: and # links
+    const href = linkEl.href;
+    if (href.startsWith('javascript:') || href === window.location.href + '#') {
+      return null;
+    }
+
+    return {
+      url: href,
+      text: linkEl.textContent?.trim().substring(0, 100) || '',
+      title: linkEl.title || linkEl.getAttribute('aria-label') || ''
+    };
+  }
+
+  // Handle mouse move for URL capture
+  function onMouseMoveForUrls(e) {
+    if (!urlCaptureEnabled) return;
+
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    if (!el) return;
+
+    const link = findLinkFromElement(el);
+    const linkInfo = link ? getLinkInfo(link) : null;
+
+    // Only send if URL changed
+    if (linkInfo?.url !== lastHoveredUrl) {
+      lastHoveredUrl = linkInfo?.url || null;
+      if (linkInfo) {
+        window.__scraperSendUrlHover?.({
+          ...linkInfo,
+          x: e.clientX,
+          y: e.clientY
+        });
+      } else {
+        window.__scraperSendUrlHover?.(null);
+      }
+    }
+  }
+
   // Handle mouse move - only update cursor, no highlighting
   function onMouseMove(e) {
     if (!isSelectionMode) return;
@@ -371,6 +427,39 @@ const DOM_INSPECTION_SCRIPT = `
       updateHighlight(null);
       lastHoveredElement = null;
       document.body.style.cursor = '';
+    },
+
+    enableUrlCapture() {
+      urlCaptureEnabled = true;
+      document.addEventListener('mousemove', onMouseMoveForUrls, true);
+    },
+
+    disableUrlCapture() {
+      urlCaptureEnabled = false;
+      document.removeEventListener('mousemove', onMouseMoveForUrls, true);
+      lastHoveredUrl = null;
+    },
+
+    getLinkAtPoint(x, y) {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return null;
+      const link = findLinkFromElement(el);
+      return link ? getLinkInfo(link) : null;
+    },
+
+    getAllLinks() {
+      const links = document.querySelectorAll('a[href]');
+      const results = [];
+      const seen = new Set();
+
+      for (const link of links) {
+        const info = getLinkInfo(link);
+        if (info && !seen.has(info.url)) {
+          seen.add(info.url);
+          results.push(info);
+        }
+      }
+      return results;
     },
 
     getElementAtPoint(x, y) {
@@ -717,6 +806,8 @@ export class DOMInspector {
   private isInjected: boolean = false;
   private onHover?: (info: ElementSelector) => void;
   private onSelect?: (info: ElementSelector) => void;
+  private onUrlHover?: (info: UrlHoverPayload | null) => void;
+  private urlCaptureEnabled: boolean = false;
 
   constructor(page: Page, cdp: CDPSession) {
     this.page = page;
@@ -736,6 +827,10 @@ export class DOMInspector {
 
     await this.page.exposeFunction('__scraperSendSelect', (info: ElementSelector) => {
       this.onSelect?.(info);
+    });
+
+    await this.page.exposeFunction('__scraperSendUrlHover', (info: UrlHoverPayload | null) => {
+      this.onUrlHover?.(info);
     });
 
     this.isInjected = true;
@@ -900,5 +995,255 @@ export class DOMInspector {
     await this.page.evaluate(() => {
       (window as any).__scraperInspector?.clearMultiHighlight();
     });
+  }
+
+  // =========================================================================
+  // URL CAPTURE METHODS
+  // =========================================================================
+
+  setUrlHoverCallback(callback: (info: UrlHoverPayload | null) => void): void {
+    this.onUrlHover = callback;
+  }
+
+  async enableUrlCapture(): Promise<void> {
+    await this.inject();
+    this.urlCaptureEnabled = true;
+    await this.page.evaluate(() => {
+      (window as any).__scraperInspector?.enableUrlCapture();
+    });
+    console.log('[DOMInspector] URL capture enabled');
+  }
+
+  async disableUrlCapture(): Promise<void> {
+    this.urlCaptureEnabled = false;
+    await this.page.evaluate(() => {
+      (window as any).__scraperInspector?.disableUrlCapture();
+    });
+    console.log('[DOMInspector] URL capture disabled');
+  }
+
+  isUrlCaptureEnabled(): boolean {
+    return this.urlCaptureEnabled;
+  }
+
+  async getLinkAtPoint(x: number, y: number): Promise<{ url: string; text?: string; title?: string } | null> {
+    await this.inject();
+    return await this.page.evaluate((coords) => {
+      return (window as any).__scraperInspector?.getLinkAtPoint(coords.x, coords.y) || null;
+    }, { x, y });
+  }
+
+  async getAllLinks(): Promise<Array<{ url: string; text?: string; title?: string }>> {
+    await this.inject();
+    return await this.page.evaluate(() => {
+      return (window as any).__scraperInspector?.getAllLinks() || [];
+    });
+  }
+
+  // =========================================================================
+  // CONTAINER CONTENT EXTRACTION
+  // =========================================================================
+
+  async extractContainerContent(selector: string): Promise<ContainerContentPayload> {
+    await this.inject();
+
+    // Use a string-based function to avoid TypeScript transpilation issues
+    const extractionScript = `
+      (function(containerSelector) {
+        var container = document.querySelector(containerSelector);
+        if (!container) return [];
+
+        var extracted = [];
+        var seen = {};
+
+        // Helper to add unique items
+        function addItem(item) {
+          var key = item.type + ':' + item.value;
+          if (!seen[key] && item.value.trim().length > 0) {
+            seen[key] = true;
+            extracted.push(item);
+          }
+        }
+
+        // Helper to get relative selector within container
+        function getRelativeSelector(el, base) {
+          if (el === base) return '';
+
+          var tag = el.tagName.toLowerCase();
+
+          // Helper to check if selector is unique within base
+          function isUnique(selector) {
+            try {
+              var matches = base.querySelectorAll(selector);
+              return matches.length === 1 && matches[0] === el;
+            } catch (e) {
+              return false;
+            }
+          }
+
+          // Try class-based selector with ALL valid classes first
+          if (el.classList && el.classList.length > 0) {
+            var validClasses = Array.from(el.classList).filter(function(c) {
+              return !c.match(/^[0-9]|hover|active|focus|selected|current|open|close|ng-|_|js-/i);
+            });
+
+            if (validClasses.length > 0) {
+              // Try all classes together first for maximum specificity
+              var fullSelector = tag + '.' + validClasses.join('.');
+              if (isUnique(fullSelector)) {
+                return fullSelector;
+              }
+
+              // Try each class individually
+              for (var i = 0; i < validClasses.length; i++) {
+                var singleSelector = tag + '.' + validClasses[i];
+                if (isUnique(singleSelector)) {
+                  return singleSelector;
+                }
+              }
+
+              // If single classes don't work, try combinations
+              for (var i = 0; i < validClasses.length; i++) {
+                for (var j = i + 1; j < validClasses.length; j++) {
+                  var comboSelector = tag + '.' + validClasses[i] + '.' + validClasses[j];
+                  if (isUnique(comboSelector)) {
+                    return comboSelector;
+                  }
+                }
+              }
+
+              // Use all classes even if not unique (better than nothing)
+              return fullSelector;
+            }
+          }
+
+          // Try position-based selector within parent
+          var parent = el.parentElement;
+          if (parent && parent !== base) {
+            var siblings = Array.from(parent.children).filter(function(s) { return s.tagName === el.tagName; });
+            if (siblings.length > 1) {
+              var index = siblings.indexOf(el) + 1;
+              var parentSelector = getRelativeSelector(parent, base);
+              var posSelector = parentSelector ? parentSelector + ' > ' + tag + ':nth-of-type(' + index + ')' : tag + ':nth-of-type(' + index + ')';
+              if (isUnique(posSelector)) {
+                return posSelector;
+              }
+            }
+
+            // Try parent selector combined with tag
+            var parentSelector = getRelativeSelector(parent, base);
+            if (parentSelector) {
+              var childSelector = parentSelector + ' > ' + tag;
+              if (isUnique(childSelector)) {
+                return childSelector;
+              }
+              // Try with :first-of-type
+              var firstSelector = parentSelector + ' > ' + tag + ':first-of-type';
+              if (isUnique(firstSelector)) {
+                return firstSelector;
+              }
+            }
+          }
+
+          // Fallback: try nth-of-type directly within container
+          var allSiblings = base.querySelectorAll(tag);
+          if (allSiblings.length > 1) {
+            var idx = Array.from(allSiblings).indexOf(el) + 1;
+            return tag + ':nth-of-type(' + idx + ')';
+          }
+
+          return tag;
+        }
+
+        // Extract all text nodes (leaf text content)
+        var walker = document.createTreeWalker(
+          container,
+          NodeFilter.SHOW_TEXT,
+          null
+        );
+
+        var textNodeParents = new Set();
+        var node;
+        while ((node = walker.nextNode())) {
+          var text = node.textContent ? node.textContent.trim() : '';
+          if (text && text.length > 0 && text.length < 200) {
+            var parent = node.parentElement;
+            if (parent && !textNodeParents.has(parent)) {
+              textNodeParents.add(parent);
+              addItem({
+                type: 'text',
+                value: text,
+                selector: getRelativeSelector(parent, container),
+                displayText: text.length > 60 ? text.substring(0, 60) + '...' : text,
+                tagName: parent.tagName.toLowerCase()
+              });
+            }
+          }
+        }
+
+        // Extract all links
+        var links = container.querySelectorAll('a[href]');
+        links.forEach(function(link) {
+          var href = link.getAttribute('href');
+          if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+            // Resolve relative URLs
+            var fullUrl = href;
+            try {
+              fullUrl = new URL(href, window.location.href).href;
+            } catch (e) {
+              fullUrl = href;
+            }
+
+            addItem({
+              type: 'link',
+              value: fullUrl,
+              selector: getRelativeSelector(link, container),
+              displayText: fullUrl.length > 60 ? fullUrl.substring(0, 60) + '...' : fullUrl,
+              tagName: 'a'
+            });
+          }
+        });
+
+        // Extract all images
+        var images = container.querySelectorAll('img[src]');
+        images.forEach(function(img) {
+          var src = img.getAttribute('src');
+          if (src) {
+            // Resolve relative URLs
+            var fullUrl = src;
+            try {
+              fullUrl = new URL(src, window.location.href).href;
+            } catch (e) {
+              fullUrl = src;
+            }
+
+            var alt = img.getAttribute('alt');
+            addItem({
+              type: 'image',
+              value: fullUrl,
+              selector: getRelativeSelector(img, container),
+              displayText: alt || fullUrl.split('/').pop() || fullUrl,
+              tagName: 'img'
+            });
+          }
+        });
+
+        return extracted;
+      })
+    `;
+
+    const items = await this.page.evaluate(
+      ({ script, sel }) => {
+        // eslint-disable-next-line no-eval
+        const fn = eval(script);
+        return fn(sel);
+      },
+      { script: extractionScript, sel: selector }
+    ) as ExtractedContentItem[];
+
+    return {
+      items: items || [],
+      containerSelector: selector,
+    };
   }
 }

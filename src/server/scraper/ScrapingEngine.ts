@@ -127,86 +127,159 @@ export class ScrapingEngine {
     const result = await this.cdp.send('Runtime.evaluate', {
       expression: `
         (function() {
-          // Helper: Extract the lowest/first price from an element containing multiple prices
-          function extractPrice(el) {
-            const text = el.textContent || '';
-            // Match price patterns: £25.45, $99.99, €19,99, 25.45, etc.
-            const priceRegex = /[£$€¥₹]?\\s*\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?|\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?\\s*[£$€¥₹]?/g;
-            const matches = text.match(priceRegex);
+          // Helper: Parse a price string to a number
+          function parsePrice(priceStr) {
+            if (!priceStr) return NaN;
+            // Remove currency symbols and whitespace, handle comma as decimal separator
+            var cleaned = priceStr.replace(/[£$€¥₹MAD\\s]/gi, '').replace(/,/g, '.');
+            // If there are multiple dots, keep only the last one as decimal
+            var parts = cleaned.split('.');
+            if (parts.length > 2) {
+              cleaned = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
+            }
+            return parseFloat(cleaned);
+          }
+
+          // Helper: Extract all prices from an element
+          function extractAllPrices(el) {
+            var text = el.textContent || '';
+            // Match price patterns: £25.45, $99.99, €19,99, 25.45 MAD, etc.
+            var priceRegex = /[£$€¥₹]?\\s*\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?(?:\\s*MAD)?|\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?\\s*[£$€¥₹MAD]*/gi;
+            var matches = text.match(priceRegex);
 
             if (!matches || matches.length === 0) {
-              return text.trim(); // Fallback to full text if no price found
+              return [];
             }
 
-            // Parse all prices and find the lowest
-            const prices = matches
-              .map(m => {
-                // Extract just the number, handling different formats
-                const cleaned = m.replace(/[£$€¥₹\\s]/g, '').replace(/,/g, '');
-                return { original: m.trim(), value: parseFloat(cleaned) };
+            // Parse all prices
+            var prices = matches
+              .map(function(m) {
+                var value = parsePrice(m);
+                return { original: m.trim(), value: value };
               })
-              .filter(p => !isNaN(p.value) && p.value > 0);
+              .filter(function(p) { return !isNaN(p.value) && p.value > 0; });
 
+            return prices;
+          }
+
+          // Helper: Extract just one price (lowest) - legacy behavior
+          function extractPrice(el) {
+            var prices = extractAllPrices(el);
             if (prices.length === 0) {
-              return matches[0].trim(); // Return first match if parsing fails
+              return (el.textContent || '').trim();
             }
-
-            // Sort by value and return the lowest price (usually the sale/current price)
-            prices.sort((a, b) => a.value - b.value);
+            // Sort and return lowest
+            prices.sort(function(a, b) { return a.value - b.value; });
             return prices[0].original;
           }
 
-          const containers = document.querySelectorAll(${JSON.stringify(containerSelector)});
+          var containers = document.querySelectorAll(${JSON.stringify(containerSelector)});
           if (containers.length === 0) {
             throw new Error('No containers found for selector: ${containerSelector}');
           }
 
-          const selectors = ${JSON.stringify(selectors)};
-          const items = [];
+          var selectors = ${JSON.stringify(selectors)};
+          var items = [];
 
-          containers.forEach((container, idx) => {
-            const item = {};
+          // Check if we have separate price roles
+          var hasOriginalPrice = selectors.some(function(s) { return s.role === 'originalPrice'; });
+          var hasSalePrice = selectors.some(function(s) { return s.role === 'salePrice'; });
+          var hasBothPriceTypes = hasOriginalPrice && hasSalePrice;
 
-            selectors.forEach(sel => {
-              const el = container.querySelector(sel.selector.css);
-              if (!el) {
-                item[sel.role] = null;
-                return;
-              }
-
-              let value = null;
-              switch (sel.extractionType) {
-                case 'text':
-                  // Special handling for price - extract just the first/lowest price
-                  if (sel.role === 'price') {
-                    value = extractPrice(el);
-                  } else {
-                    value = el.textContent?.trim() || null;
-                  }
-                  break;
-                case 'href':
-                  value = el.getAttribute('href') || null;
-                  // Make relative URLs absolute
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'src':
-                  value = el.getAttribute('src') || null;
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'attribute':
-                  value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
-                  break;
-                case 'innerHTML':
-                  value = el.innerHTML;
-                  break;
-              }
-
-              item[sel.customName || sel.role] = value;
+          // Group selectors by role and sort by priority for fallback support
+          var selectorsByRole = {};
+          selectors.forEach(function(sel) {
+            var role = sel.role;
+            if (!selectorsByRole[role]) {
+              selectorsByRole[role] = [];
+            }
+            selectorsByRole[role].push(sel);
+          });
+          // Sort each group by priority (lower = first)
+          Object.keys(selectorsByRole).forEach(function(role) {
+            selectorsByRole[role].sort(function(a, b) {
+              return (a.priority || 0) - (b.priority || 0);
             });
+          });
+
+          // Helper to extract value from element based on extraction type
+          function extractValue(el, sel) {
+            if (!el) return null;
+            var value = null;
+            switch (sel.extractionType) {
+              case 'text':
+                if (sel.role === 'price') {
+                  value = extractPrice(el);
+                } else if (sel.role === 'originalPrice' || sel.role === 'salePrice') {
+                  value = (el.textContent || '').trim();
+                } else {
+                  value = (el.textContent || '').trim() || null;
+                }
+                break;
+              case 'href':
+                value = el.getAttribute('href') || null;
+                if (value && !value.startsWith('http')) {
+                  value = new URL(value, window.location.origin).href;
+                }
+                break;
+              case 'src':
+                value = el.getAttribute('src') || null;
+                if (value && !value.startsWith('http')) {
+                  value = new URL(value, window.location.origin).href;
+                }
+                break;
+              case 'attribute':
+                value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
+                break;
+              case 'innerHTML':
+                value = el.innerHTML;
+                break;
+            }
+            return value;
+          }
+
+          containers.forEach(function(container, idx) {
+            var item = {};
+
+            // For each role, try selectors in priority order until we get a value
+            Object.keys(selectorsByRole).forEach(function(role) {
+              var roleSelectors = selectorsByRole[role];
+              var value = null;
+
+              // Try each selector in priority order
+              for (var i = 0; i < roleSelectors.length && !value; i++) {
+                var sel = roleSelectors[i];
+                var cssSelector = sel.selector.css;
+                var el = container.querySelector(cssSelector);
+
+                if (idx === 0) {
+                  // Debug first container
+                  console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Selector: "' + cssSelector + '", Found: ' + (el ? 'YES' : 'NO'));
+                }
+
+                if (el) {
+                  value = extractValue(el, sel);
+                  if (idx === 0) {
+                    console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Value: "' + (value || 'null').substring(0, 50) + '"');
+                  }
+                }
+              }
+
+              item[roleSelectors[0].customName || role] = value;
+            });
+
+            // Auto-detect sale price: if both prices exist, ensure salePrice <= originalPrice
+            if (hasBothPriceTypes && item.originalPrice && item.salePrice) {
+              var origVal = parsePrice(item.originalPrice);
+              var saleVal = parsePrice(item.salePrice);
+
+              // If original is actually lower than sale, swap them
+              if (!isNaN(origVal) && !isNaN(saleVal) && origVal < saleVal) {
+                var temp = item.originalPrice;
+                item.originalPrice = item.salePrice;
+                item.salePrice = temp;
+              }
+            }
 
             items.push(item);
           });
@@ -231,36 +304,54 @@ export class ScrapingEngine {
     const result = await this.cdp.send('Runtime.evaluate', {
       expression: `
         (function() {
-          const selectors = ${JSON.stringify(selectors)};
+          var selectors = ${JSON.stringify(selectors)};
+
+          // Helper: Parse a price string to a number
+          function parsePrice(priceStr) {
+            if (!priceStr) return NaN;
+            // Remove currency symbols and whitespace, handle comma as decimal separator
+            var cleaned = priceStr.replace(/[£$€¥₹MAD\\s]/gi, '').replace(/,/g, '.');
+            // If there are multiple dots, keep only the last one as decimal
+            var parts = cleaned.split('.');
+            if (parts.length > 2) {
+              cleaned = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
+            }
+            return parseFloat(cleaned);
+          }
 
           // Helper: Extract the lowest/first price from an element containing multiple prices
           function extractPrice(el) {
-            const text = el.textContent || '';
+            var text = el.textContent || '';
             // Match price patterns: £25.45, $99.99, €19,99, 25.45, etc.
-            const priceRegex = /[£$€¥₹]?\\s*\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?|\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?\\s*[£$€¥₹]?/g;
-            const matches = text.match(priceRegex);
+            var priceRegex = /[£$€¥₹]?\\s*\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?(?:\\s*MAD)?|\\d{1,3}(?:[,.]\\d{3})*(?:[,.]\\d{1,2})?\\s*[£$€¥₹MAD]*/gi;
+            var matches = text.match(priceRegex);
 
             if (!matches || matches.length === 0) {
               return text.trim(); // Fallback to full text if no price found
             }
 
             // Parse all prices and find the lowest
-            const prices = matches
-              .map(m => {
+            var prices = matches
+              .map(function(m) {
                 // Extract just the number, handling different formats
-                const cleaned = m.replace(/[£$€¥₹\\s]/g, '').replace(/,/g, '');
+                var cleaned = m.replace(/[£$€¥₹MAD\\s]/gi, '').replace(/,/g, '.');
                 return { original: m.trim(), value: parseFloat(cleaned) };
               })
-              .filter(p => !isNaN(p.value) && p.value > 0);
+              .filter(function(p) { return !isNaN(p.value) && p.value > 0; });
 
             if (prices.length === 0) {
               return matches[0].trim(); // Return first match if parsing fails
             }
 
             // Sort by value and return the lowest price (usually the sale/current price)
-            prices.sort((a, b) => a.value - b.value);
+            prices.sort(function(a, b) { return a.value - b.value; });
             return prices[0].original;
           }
+
+          // Check if we have separate price roles
+          var hasOriginalPrice = selectors.some(function(s) { return s.role === 'originalPrice'; });
+          var hasSalePrice = selectors.some(function(s) { return s.role === 'salePrice'; });
+          var hasBothPriceTypes = hasOriginalPrice && hasSalePrice;
 
           // Helper: Find the closest common ancestor of multiple elements
           function findCommonAncestor(elements) {
@@ -289,7 +380,171 @@ export class ScrapingEngine {
             // Debug: Log what selectors we're looking for
             console.log('[ScrapingEngine] Looking for selectors:', selectors.map(s => s.selector.css));
 
-            // Get first element from each selector
+            // Helper: Check if an element is a valid container (not header/nav/button/etc)
+            function isValidContainer(el) {
+              const tagName = el.tagName.toLowerCase();
+              // Skip these elements - they're never product containers
+              const invalidTags = ['button', 'nav', 'header', 'footer', 'aside', 'form', 'input', 'select', 'a', 'img', 'svg', 'path', 'span', 'label', 'ul', 'option'];
+              if (invalidTags.includes(tagName)) return false;
+
+              // Skip if it's inside header/nav/dropdown
+              if (el.closest('header, nav, footer, aside, [class*="dropdown"], [class*="menu"], [role="menu"], [role="listbox"]')) return false;
+
+              // Check class names for header/nav/dropdown patterns
+              const className = el.className || '';
+              if (typeof className === 'string') {
+                const lowerClass = className.toLowerCase();
+                if (lowerClass.match(/header|nav|menu|footer|sidebar|modal|popup|banner|cookie|dropdown|select|toggle|language|country|region|locale|currency/)) {
+                  return false;
+                }
+              }
+
+              // Skip li elements unless they have product-related classes
+              if (tagName === 'li') {
+                if (typeof className === 'string' && className.toLowerCase().match(/product|item|card|tile|entry|listing|result|data|goods/)) {
+                  return true; // Allow product list items
+                }
+                return false; // Reject other li elements
+              }
+
+              return true;
+            }
+
+            // Helper: Check if element has product-related class
+            function hasProductClass(el) {
+              const className = el.className || '';
+              if (typeof className === 'string') {
+                return className.toLowerCase().match(/product|item|card|tile|entry|listing|result|data-pushed|goods|sku|offer/);
+              }
+              return false;
+            }
+
+            // Get ALL elements matching each selector
+            const allElementsPerSelector = selectors.map(sel => {
+              const selector = sel.selector.css;
+              const elements = document.querySelectorAll(selector);
+              console.log('[ScrapingEngine] Selector "' + selector + '" found: ' + elements.length + ' elements');
+              return { selector: sel, elements: Array.from(elements) };
+            });
+
+            // If we have generic selectors that match many elements, use those to find containers
+            const hasMultipleMatches = allElementsPerSelector.some(s => s.elements.length > 1);
+
+            if (hasMultipleMatches) {
+              // Find common container for matched elements
+              // Get the selector with most matches to use as anchor
+              const sortedByMatches = [...allElementsPerSelector].sort((a, b) => b.elements.length - a.elements.length);
+              const primaryElements = sortedByMatches[0].elements;
+
+              if (primaryElements.length > 1) {
+                console.log('[ScrapingEngine] Using ' + primaryElements.length + ' elements from "' + sortedByMatches[0].selector.selector.css + '" to find container');
+
+                // Build a map of potential containers by walking up from EACH primary element
+                // and finding which ancestor pattern appears most frequently
+                const containerCandidates = new Map(); // selector -> { count, containers, containedElements }
+
+                // Sample up to 20 elements to avoid performance issues
+                const sampleSize = Math.min(20, primaryElements.length);
+                const sampleElements = primaryElements.slice(0, sampleSize);
+
+                for (const el of sampleElements) {
+                  let parent = el.parentElement;
+                  let depth = 0;
+                  const maxDepth = 10;
+
+                  while (parent && parent !== document.body && depth < maxDepth) {
+                    depth++;
+
+                    // Skip invalid containers
+                    if (!isValidContainer(parent)) {
+                      parent = parent.parentElement;
+                      continue;
+                    }
+
+                    const tagName = parent.tagName.toLowerCase();
+                    const classes = parent.className && typeof parent.className === 'string'
+                      ? parent.className.split(' ').filter(c => c && !c.includes('--') && c.length > 1 && !c.match(/^(is-|has-|js-|ng-|_)/))
+                      : [];
+
+                    // Build selector candidates for this parent
+                    const selectorCandidates = [];
+
+                    // Prioritize product-related classes
+                    const productClasses = classes.filter(c => c.toLowerCase().match(/product|item|card|tile|entry|listing|result|data|goods|sku|offer/));
+                    if (productClasses.length > 0) {
+                      selectorCandidates.push(tagName + '.' + productClasses[0]);
+                    }
+
+                    // Then try first class
+                    if (classes.length > 0) {
+                      selectorCandidates.push(tagName + '.' + classes[0]);
+                    }
+
+                    for (const selector of selectorCandidates) {
+                      if (!containerCandidates.has(selector)) {
+                        const allMatches = document.querySelectorAll(selector);
+                        // Filter to only valid containers
+                        const validMatches = Array.from(allMatches).filter(isValidContainer);
+                        containerCandidates.set(selector, {
+                          count: 0,
+                          containers: validMatches,
+                          containedElements: new Set(),
+                          hasProductClass: hasProductClass(parent)
+                        });
+                      }
+
+                      const candidate = containerCandidates.get(selector);
+                      // Check if this element is in one of the containers
+                      for (const container of candidate.containers) {
+                        if (container.contains(el)) {
+                          candidate.containedElements.add(el);
+                          break;
+                        }
+                      }
+                    }
+
+                    parent = parent.parentElement;
+                  }
+                }
+
+                // Find the best container: most elements contained + reasonable count + ideally has product class
+                let bestSelector = null;
+                let bestScore = 0;
+                let bestContainers = [];
+
+                for (const [selector, data] of containerCandidates) {
+                  const containedCount = data.containedElements.size;
+                  const containerCount = data.containers.length;
+
+                  // Skip if too few or too many containers
+                  if (containerCount < 2 || containerCount > 500) continue;
+
+                  // Skip if doesn't contain enough of our sampled elements
+                  if (containedCount < sampleSize * 0.3) continue;
+
+                  // Score: prioritize high containment ratio, then product classes
+                  let score = containedCount / sampleSize;
+                  if (data.hasProductClass) score += 0.5;
+                  // Prefer containers in reasonable quantity range
+                  if (containerCount >= 5 && containerCount <= 200) score += 0.2;
+
+                  console.log('[ScrapingEngine] Candidate "' + selector + '": ' + containerCount + ' containers, contains ' + containedCount + '/' + sampleSize + ' elements, score=' + score.toFixed(2));
+
+                  if (score > bestScore) {
+                    bestScore = score;
+                    bestSelector = selector;
+                    bestContainers = data.containers;
+                  }
+                }
+
+                if (bestSelector && bestContainers.length > 0) {
+                  console.log('[ScrapingEngine] Best container: ' + bestSelector + ' (' + bestContainers.length + ' items)');
+                  return { containers: bestContainers, selector: bestSelector };
+                }
+              }
+            }
+
+            // Fallback: Get first element from each selector
             const firstElements = selectors
               .map(sel => {
                 const el = document.querySelector(sel.selector.css);
@@ -305,45 +560,45 @@ export class ScrapingEngine {
               return null;
             }
 
-            // NEW APPROACH: Find the container by looking at the first element's ancestors
-            // and finding a repeating pattern
+            // Walk up the DOM from first element to find a container that repeats
             const firstEl = firstElements[0];
-
-            // Walk up the DOM to find a container that repeats
             let container = firstEl.parentElement;
             let containerSelector = null;
             let allContainers = [];
 
             while (container && container !== document.body) {
-              // Build a selector for this container
-              const tagName = container.tagName.toLowerCase();
-              const classes = container.className ? container.className.split(' ').filter(c => c && !c.includes('--')) : [];
+              // Skip invalid containers
+              if (!isValidContainer(container)) {
+                container = container.parentElement;
+                continue;
+              }
 
-              // Try different selector strategies
+              const tagName = container.tagName.toLowerCase();
+              const classes = container.className && typeof container.className === 'string'
+                ? container.className.split(' ').filter(c => c && !c.includes('--'))
+                : [];
+
               const selectorStrategies = [];
 
-              // Strategy 1: tag + all classes
+              // Prioritize product-related classes
+              const productClasses = classes.filter(c => c.toLowerCase().match(/product|item|card|tile|entry|listing|result|data|goods/));
+              if (productClasses.length > 0) {
+                selectorStrategies.push(tagName + '.' + productClasses[0]);
+              }
+
               if (classes.length > 0) {
                 selectorStrategies.push(tagName + '.' + classes.join('.'));
-              }
-
-              // Strategy 2: tag + first class only
-              if (classes.length > 0) {
                 selectorStrategies.push(tagName + '.' + classes[0]);
               }
-
-              // Strategy 3: just the tag
               selectorStrategies.push(tagName);
 
               for (const selector of selectorStrategies) {
                 const matches = document.querySelectorAll(selector);
-                console.log('[ScrapingEngine] Trying container selector "' + selector + '": ' + matches.length + ' matches');
+                const validMatches = Array.from(matches).filter(isValidContainer);
+                console.log('[ScrapingEngine] Trying container selector "' + selector + '": ' + validMatches.length + ' valid matches');
 
-                // Check if all our target elements have a match within these containers
-                if (matches.length > 1 && matches.length < 200) { // reasonable number of product cards
-                  // Verify that each container has ALL of our selector elements (not just some)
-                  const containersWithAllElements = Array.from(matches).filter(c => {
-                    // Check that this container has ALL selectors, not just one
+                if (validMatches.length > 1 && validMatches.length < 200) {
+                  const containersWithAllElements = validMatches.filter(c => {
                     return selectors.every(sel => c.querySelector(sel.selector.css));
                   });
 
@@ -383,61 +638,145 @@ export class ScrapingEngine {
           console.log('[ScrapingEngine] Auto-detected container: ' + containerInfo.selector);
           console.log('[ScrapingEngine] Found ' + containerInfo.containers.length + ' item containers');
 
+          // Group selectors by role and sort by priority for fallback support
+          var selectorsByRole = {};
+          selectors.forEach(function(sel) {
+            var role = sel.role;
+            if (!selectorsByRole[role]) {
+              selectorsByRole[role] = [];
+            }
+            selectorsByRole[role].push(sel);
+          });
+          // Sort each group by priority (lower = first)
+          Object.keys(selectorsByRole).forEach(function(role) {
+            selectorsByRole[role].sort(function(a, b) {
+              return (a.priority || 0) - (b.priority || 0);
+            });
+          });
+
+          // Helper to find element using multiple strategies
+          function findElement(container, sel) {
+            var el = null;
+            var css = sel.selector.css;
+
+            // Strategy 1: Use the selector directly
+            el = container.querySelector(css);
+
+            // Strategy 2: Try with container context
+            if (!el && css.includes(' ')) {
+              var parts = css.split(' ');
+              for (var i = Math.min(3, parts.length); i >= 1 && !el; i--) {
+                var partialSelector = parts.slice(-i).join(' ');
+                el = container.querySelector(partialSelector);
+              }
+            }
+
+            // Strategy 3: Try by tag + class
+            if (!el && sel.selector.tagName) {
+              var tagSelector = sel.selector.tagName.toLowerCase();
+              var classAttr = sel.selector.attributes && sel.selector.attributes.class;
+              if (classAttr) {
+                var firstClass = classAttr.split(' ')[0];
+                el = container.querySelector(tagSelector + '.' + firstClass) ||
+                     container.querySelector('.' + firstClass) ||
+                     container.querySelector(tagSelector);
+              } else {
+                el = container.querySelector(tagSelector);
+              }
+            }
+
+            return el;
+          }
+
+          // Helper to extract value from element
+          function extractValue(el, sel) {
+            if (!el) return null;
+            var value = null;
+            switch (sel.extractionType) {
+              case 'text':
+                if (sel.role === 'price') {
+                  value = extractPrice(el);
+                } else if (sel.role === 'originalPrice' || sel.role === 'salePrice') {
+                  value = (el.textContent || '').trim();
+                } else {
+                  value = (el.textContent || '').trim() || null;
+                }
+                break;
+              case 'href':
+                value = el.getAttribute('href');
+                if (value && !value.startsWith('http')) {
+                  value = new URL(value, window.location.origin).href;
+                }
+                break;
+              case 'src':
+                value = el.getAttribute('src');
+                if (value && !value.startsWith('http')) {
+                  value = new URL(value, window.location.origin).href;
+                }
+                break;
+              case 'attribute':
+                value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
+                break;
+              case 'innerHTML':
+                value = el.innerHTML;
+                break;
+              default:
+                if (sel.role === 'price') {
+                  value = extractPrice(el);
+                } else if (sel.role === 'originalPrice' || sel.role === 'salePrice') {
+                  value = (el.textContent || '').trim();
+                } else {
+                  value = (el.textContent || '').trim() || null;
+                }
+            }
+            return value;
+          }
+
           const items = [];
-          containerInfo.containers.forEach(container => {
+          containerInfo.containers.forEach((container, idx) => {
             const item = {};
             let hasAnyValue = false;
 
-            selectors.forEach(sel => {
-              // Try to find element within this container
-              const el = container.querySelector(sel.selector.css) ||
-                         // Fallback: try relative selector (last part of CSS)
-                         container.querySelector(sel.selector.css.split(' ').pop());
+            // For each role, try selectors in priority order until we get a value
+            Object.keys(selectorsByRole).forEach(function(role) {
+              var roleSelectors = selectorsByRole[role];
+              var value = null;
 
-              if (!el) {
-                item[sel.customName || sel.role] = null;
-                return;
+              // Try each selector in priority order
+              for (var i = 0; i < roleSelectors.length && !value; i++) {
+                var sel = roleSelectors[i];
+                var cssSelector = sel.selector.css;
+                var el = findElement(container, sel);
+
+                if (idx === 0) {
+                  // Debug first container
+                  console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Selector: "' + cssSelector + '", Found: ' + (el ? 'YES' : 'NO'));
+                }
+
+                if (el) {
+                  value = extractValue(el, sel);
+                  if (idx === 0) {
+                    console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Value: "' + (value || 'null').substring(0, 50) + '"');
+                  }
+                  if (value) hasAnyValue = true;
+                }
               }
 
-              hasAnyValue = true;
-              let value = null;
-              switch (sel.extractionType) {
-                case 'text':
-                  // Special handling for price - extract just the first/lowest price
-                  if (sel.role === 'price') {
-                    value = extractPrice(el);
-                  } else {
-                    value = el.textContent?.trim() || null;
-                  }
-                  break;
-                case 'href':
-                  value = el.getAttribute('href');
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'src':
-                  value = el.getAttribute('src');
-                  if (value && !value.startsWith('http')) {
-                    value = new URL(value, window.location.origin).href;
-                  }
-                  break;
-                case 'attribute':
-                  value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
-                  break;
-                case 'innerHTML':
-                  value = el.innerHTML;
-                  break;
-                default:
-                  // Also check for price in default case
-                  if (sel.role === 'price') {
-                    value = extractPrice(el);
-                  } else {
-                    value = el.textContent?.trim() || null;
-                  }
-              }
-              item[sel.customName || sel.role] = value;
+              item[roleSelectors[0].customName || role] = value;
             });
+
+            // Auto-detect sale price: if both prices exist, ensure salePrice <= originalPrice
+            if (hasBothPriceTypes && item.originalPrice && item.salePrice) {
+              var origVal = parsePrice(item.originalPrice);
+              var saleVal = parsePrice(item.salePrice);
+
+              // If original is actually lower than sale, swap them
+              if (!isNaN(origVal) && !isNaN(saleVal) && origVal < saleVal) {
+                var temp = item.originalPrice;
+                item.originalPrice = item.salePrice;
+                item.salePrice = temp;
+              }
+            }
 
             // Only add items that have at least one value
             if (hasAnyValue) {
@@ -638,94 +977,149 @@ export class ScrapingEngine {
   }
 
   private async autoScrollToLoadContent(selectors: AssignedSelector[]): Promise<void> {
-    const baseScrollDelay = 400; // Ms between scrolls - give time for lazy load to trigger
-    const maxScrollAttempts = 100; // Max scroll iterations
-    const stableCountThreshold = 4; // Stop after N scrolls with no new elements
+    const slowScrollDelay = 1000; // Ms between scrolls - VERY SLOW for lazy load
+    const scrollStepSize = 250; // Pixels to scroll each step (small for slow scrolling)
     const loadingWaitTimeout = 3000; // Max ms to wait for loading indicator to disappear
+    const maxCycles = 10; // Max number of bottom-up cycles to prevent infinite loops
 
-    let lastElementCount = 0;
-    let stableCount = 0;
-    let previousScrollTop = -1;
-
-    console.log('[ScrapingEngine] Auto-scroll: starting lazy load detection...');
+    console.log('[ScrapingEngine] Auto-scroll: starting lazy load detection (cyclic bottom-up strategy)...');
 
     // First, try to disable lazy loading mechanisms
     await this.disableLazyLoading();
-    await new Promise((r) => setTimeout(r, 500)); // Wait for any triggered loads
+    await new Promise((r) => setTimeout(r, 500));
 
-    for (let i = 0; i < maxScrollAttempts; i++) {
-      // Get current element count and scroll position info
-      const { count, lastElementBottom, viewportHeight, pageHeight, currentScroll } = await this.page.evaluate((sels) => {
+    // Helper to get current element count
+    const getElementCount = async (): Promise<number> => {
+      return await this.page.evaluate((sels) => {
         let total = 0;
-        let lastBottom = 0;
-
         sels.forEach((sel: { selector: { css: string } }) => {
-          const elements = document.querySelectorAll(sel.selector.css);
-          total += elements.length;
+          total += document.querySelectorAll(sel.selector.css).length;
+        });
+        return total;
+      }, selectors);
+    };
 
-          // Find the bottommost element
-          elements.forEach((el) => {
-            const rect = el.getBoundingClientRect();
-            const absoluteBottom = rect.bottom + window.scrollY;
-            if (absoluteBottom > lastBottom) {
-              lastBottom = absoluteBottom;
-            }
-          });
+    // Helper to scroll to bottom and wait for page to expand
+    const scrollToBottomAndWait = async (): Promise<number> => {
+      let pageHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
+      let previousHeight = 0;
+      let heightStableCount = 0;
+
+      while (heightStableCount < 3) {
+        await this.page.evaluate(() => {
+          window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
         });
 
-        return {
-          count: total,
-          lastElementBottom: lastBottom,
-          viewportHeight: window.innerHeight,
-          pageHeight: document.documentElement.scrollHeight,
-          currentScroll: window.scrollY
-        };
-      }, selectors);
+        await this.triggerLazyLoadEvents();
+        await new Promise((r) => setTimeout(r, 800));
+        await this.waitForLoadingToComplete(loadingWaitTimeout);
 
-      // Check if we've loaded new content
-      if (count > lastElementCount) {
-        lastElementCount = count;
-        stableCount = 0;
-        console.log(`[ScrapingEngine] Auto-scroll: found ${count} elements`);
-      } else {
-        stableCount++;
-        if (stableCount >= stableCountThreshold) {
-          console.log(`[ScrapingEngine] Auto-scroll complete: no new content after ${stableCountThreshold} scrolls`);
-          break;
+        const newHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
+
+        if (newHeight === previousHeight) {
+          heightStableCount++;
+        } else {
+          heightStableCount = 0;
+          console.log(`[ScrapingEngine] Page expanded to ${newHeight}px`);
+        }
+
+        previousHeight = newHeight;
+        pageHeight = newHeight;
+      }
+
+      return pageHeight;
+    };
+
+    // Helper to slowly scroll up and detect new elements - STOPS IMMEDIATELY when new products found
+    const slowScrollUp = async (pageHeight: number, startCount: number): Promise<{ newCount: number; foundNew: boolean }> => {
+      let currentPosition = pageHeight;
+      let lastCount = startCount;
+
+      console.log(`[ScrapingEngine] Slowly scrolling up from ${pageHeight}px...`);
+
+      while (currentPosition > 0) {
+        // Scroll up by small increment
+        currentPosition = Math.max(0, currentPosition - scrollStepSize);
+
+        await this.page.evaluate((pos) => {
+          window.scrollTo({ top: pos, behavior: 'smooth' });
+        }, currentPosition);
+
+        // Wait for smooth scroll to complete - SLOW
+        await new Promise((r) => setTimeout(r, slowScrollDelay));
+
+        // Trigger lazy load events
+        await this.triggerLazyLoadEvents();
+
+        // Wait for any loading
+        await this.waitForLoadingToComplete(loadingWaitTimeout);
+
+        // Check element count
+        const currentCount = await getElementCount();
+
+        if (currentCount > lastCount) {
+          console.log(`[ScrapingEngine] NEW PRODUCTS LOADED! ${currentCount} elements (was ${lastCount}) at ${currentPosition}px`);
+          console.log(`[ScrapingEngine] Stopping scroll-up immediately, will go back to bottom...`);
+          // Return immediately - don't continue scrolling up
+          return { newCount: currentCount, foundNew: true };
+        }
+
+        // Log progress every 5 steps
+        if (Math.floor(currentPosition / scrollStepSize) % 5 === 0 && currentPosition > 0) {
+          console.log(`[ScrapingEngine] Scroll position: ${currentPosition}px, elements: ${lastCount}`);
         }
       }
 
-      // Check if we've reached true bottom (scroll position didn't change)
-      const atBottom = currentScroll + viewportHeight >= pageHeight - 10;
-      const scrollStuck = Math.abs(currentScroll - previousScrollTop) < 5 && previousScrollTop >= 0;
+      // Reached top without finding new elements
+      return { newCount: lastCount, foundNew: false };
+    };
 
-      if ((atBottom || scrollStuck) && stableCount > 0) {
-        console.log('[ScrapingEngine] Auto-scroll: reached bottom of page');
-        break;
+    // Get initial element count
+    let totalElementCount = await getElementCount();
+    console.log(`[ScrapingEngine] Initial element count: ${totalElementCount}`);
+
+    // Main cycle: scroll to bottom -> scroll up slowly -> if new elements found, repeat
+    let cycleCount = 0;
+    let keepGoing = true;
+
+    while (keepGoing && cycleCount < maxCycles) {
+      cycleCount++;
+      console.log(`[ScrapingEngine] === CYCLE ${cycleCount}/${maxCycles} ===`);
+
+      // Step 1: Scroll to bottom and wait for page to fully expand
+      console.log('[ScrapingEngine] Step 1: Scrolling to bottom...');
+      const pageHeight = await scrollToBottomAndWait();
+      console.log(`[ScrapingEngine] Page height: ${pageHeight}px`);
+
+      // Check if we got new elements just from scrolling down
+      const afterBottomCount = await getElementCount();
+      if (afterBottomCount > totalElementCount) {
+        console.log(`[ScrapingEngine] Found ${afterBottomCount - totalElementCount} new elements after scrolling to bottom`);
+        totalElementCount = afterBottomCount;
       }
 
-      previousScrollTop = currentScroll;
+      // Step 2: Slowly scroll up
+      console.log('[ScrapingEngine] Step 2: Slowly scrolling up...');
+      const { newCount, foundNew } = await slowScrollUp(pageHeight, totalElementCount);
 
-      // Scroll strategy: scroll DOWN past the last element by a significant amount
-      // This ensures lazy load triggers (often placed BEFORE the end of content) get activated
-      // Scroll to position that puts the last element near the TOP of viewport (1/4 down)
-      const targetScroll = Math.max(0, lastElementBottom - (viewportHeight / 4));
+      if (newCount > totalElementCount) {
+        console.log(`[ScrapingEngine] Cycle ${cycleCount} found ${newCount - totalElementCount} new elements!`);
+        totalElementCount = newCount;
+      }
 
-      // Also try scrolling a bit further if we're not making progress
-      const scrollAmount = stableCount > 1 ? targetScroll + viewportHeight : targetScroll;
+      // If we found new elements during scroll up, do another cycle
+      if (foundNew) {
+        console.log('[ScrapingEngine] New elements detected during scroll-up, will repeat cycle...');
+        // Small pause before next cycle
+        await new Promise((r) => setTimeout(r, 500));
+      } else {
+        console.log('[ScrapingEngine] No new elements found during scroll-up, finishing...');
+        keepGoing = false;
+      }
+    }
 
-      await this.page.evaluate((target) => {
-        window.scrollTo({ top: target, behavior: 'instant' });
-      }, scrollAmount);
-
-      // Trigger lazy load events after scrolling
-      await this.triggerLazyLoadEvents();
-
-      // Wait for scroll to complete and content to potentially load
-      await new Promise((r) => setTimeout(r, baseScrollDelay));
-
-      // Check for loading indicators and wait if found
-      await this.waitForLoadingToComplete(loadingWaitTimeout);
+    if (cycleCount >= maxCycles) {
+      console.log(`[ScrapingEngine] Reached max cycles (${maxCycles}), stopping`);
     }
 
     // Final wait for any remaining loading
@@ -733,11 +1127,11 @@ export class ScrapingEngine {
 
     // Scroll back to top before extraction
     await this.page.evaluate(() => {
-      window.scrollTo(0, 0);
+      window.scrollTo({ top: 0, behavior: 'instant' });
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 300));
 
-    console.log(`[ScrapingEngine] Auto-scroll finished: ${lastElementCount} total elements found`);
+    console.log(`[ScrapingEngine] Auto-scroll finished after ${cycleCount} cycles: ${totalElementCount} total elements found`);
   }
 
   // Wait for loading indicators to disappear

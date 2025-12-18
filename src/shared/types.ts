@@ -33,7 +33,12 @@ export type WSMessageType =
   | 'scrape:error'
   | 'webrtc:offer'
   | 'webrtc:answer'
-  | 'webrtc:ice';
+  | 'webrtc:ice'
+  | 'url:hover'
+  | 'url:captured'
+  | 'url:history'
+  | 'container:extract'
+  | 'container:content';
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;
@@ -120,8 +125,22 @@ export interface DOMHighlight {
   id?: string;
 }
 
+// Container Content Extraction Types
+export interface ExtractedContentItem {
+  type: 'text' | 'link' | 'image';
+  value: string;
+  selector: string;
+  displayText: string;
+  tagName?: string;
+}
+
+export interface ContainerContentPayload {
+  items: ExtractedContentItem[];
+  containerSelector: string;
+}
+
 // Selector Assignment Types
-export type SelectorRole = 'title' | 'price' | 'url' | 'nextPage' | 'image' | 'custom';
+export type SelectorRole = 'title' | 'price' | 'originalPrice' | 'salePrice' | 'url' | 'nextPage' | 'image' | 'custom';
 
 export interface AssignedSelector {
   role: SelectorRole;
@@ -129,6 +148,7 @@ export interface AssignedSelector {
   customName?: string;
   extractionType: 'text' | 'attribute' | 'href' | 'src' | 'innerHTML';
   attributeName?: string;
+  priority?: number; // For fallback ordering - lower number = higher priority (tried first)
 }
 
 // Recorder Types
@@ -272,6 +292,8 @@ export interface AppSettings {
 export type ExtendedSelectorRole =
   | 'title'
   | 'price'
+  | 'originalPrice'
+  | 'salePrice'
   | 'url'
   | 'nextPage'
   | 'image'
@@ -281,3 +303,18 @@ export type ExtendedSelectorRole =
   | 'availability'
   | 'category'
   | 'custom';
+
+// URL Capture Types
+export interface CapturedUrl {
+  url: string;
+  text?: string;
+  title?: string;
+  timestamp: number;
+}
+
+export interface UrlHoverPayload {
+  url: string;
+  text?: string;
+  x: number;
+  y: number;
+}

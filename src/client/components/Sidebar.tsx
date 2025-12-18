@@ -10,6 +10,7 @@ import type {
   RecorderAction,
   ScraperConfig,
   ScrapeResult,
+  ExtractedContentItem,
 } from '../../shared/types';
 
 interface SidebarProps {
@@ -28,8 +29,8 @@ interface SidebarProps {
 
   // Assigned selectors
   assignedSelectors: AssignedSelector[];
-  assignSelector: (role: SelectorRole, element: ElementSelector, extractionType?: string) => void;
-  removeSelector: (role: SelectorRole) => void;
+  assignSelector: (role: SelectorRole, element: ElementSelector, extractionType?: string, priority?: number) => void;
+  removeSelector: (role: SelectorRole, priority?: number) => void;
   testSelector: (selector: string) => void;
   selectorTestResult: { valid: boolean; count: number; error?: string } | null;
 
@@ -52,11 +53,20 @@ interface SidebarProps {
   onSaveScraper?: () => void;
   hasUnsavedChanges?: boolean;
   lastSavedAt?: number | null;
+
+  // Container selector (for save/load)
+  itemContainerSelector?: string;
+  onContainerSelectorChange?: (selector: string) => void;
+
+  // Container extraction (from server)
+  extractContainerContent?: (selector: string) => void;
+  extractedContent?: ExtractedContentItem[];
 }
 
 const SELECTOR_ROLES: { role: SelectorRole; label: string; extractionType: string }[] = [
   { role: 'title', label: 'Title', extractionType: 'text' },
-  { role: 'price', label: 'Price', extractionType: 'text' },
+  { role: 'originalPrice', label: 'Original Price', extractionType: 'text' },
+  { role: 'salePrice', label: 'Sale Price', extractionType: 'text' },
   { role: 'url', label: 'URL', extractionType: 'href' },
   { role: 'image', label: 'Image', extractionType: 'src' },
   { role: 'nextPage', label: 'Next Page', extractionType: 'text' },
@@ -91,6 +101,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSaveScraper,
   hasUnsavedChanges,
   lastSavedAt,
+  itemContainerSelector: externalContainerSelector,
+  onContainerSelectorChange,
+  extractContainerContent,
+  extractedContent,
 }) => {
   const [expandedPanels, setExpandedPanels] = useState({
     selectors: true,
@@ -98,151 +112,147 @@ export const Sidebar: React.FC<SidebarProps> = ({
     results: true,
   });
   const [testSelectorInput, setTestSelectorInput] = useState('');
-  const [itemContainerSelector, setItemContainerSelector] = useState('');
+  const [internalContainerSelector, setInternalContainerSelector] = useState('');
   const [maxPages, setMaxPages] = useState(1);
+
+  // Use external container selector if provided, otherwise use internal state
+  const itemContainerSelector = externalContainerSelector ?? internalContainerSelector;
+  const setItemContainerSelector = onContainerSelectorChange ?? setInternalContainerSelector;
   const [internalScraperName, setInternalScraperName] = useState('My Scraper');
 
   // Wizard state for guided selection
-  type WizardStep = 'product1' | 'product2' | 'complete';
-  const [wizardStep, setWizardStep] = useState<WizardStep>('product1');
-  const [product1Selections, setProduct1Selections] = useState<{ role: SelectorRole; element: ElementSelector; extractionType: string }[]>([]);
-  const [product2Selections, setProduct2Selections] = useState<{ role: SelectorRole; element: ElementSelector; extractionType: string }[]>([]);
+  type WizardStep = 'container' | 'labeling' | 'complete';
+  const [wizardStep, setWizardStep] = useState<WizardStep>('container');
+  const [containerElement, setContainerElement] = useState<ElementSelector | null>(null);
+  // Map of itemValue -> { role, priority } - allows multiple items per role with priorities
+  const [labeledItems, setLabeledItems] = useState<Map<string, { role: SelectorRole; priority: number }>>(new Map());
 
   // Use external scraper name if provided, otherwise use internal state
   const scraperName = externalScraperName ?? internalScraperName;
   const setScraperName = onScraperNameChange ?? setInternalScraperName;
 
+  // Use server-extracted content (from props)
+  const extractedItems = extractedContent || [];
+
   // Reset wizard
   const resetWizard = useCallback(() => {
-    setWizardStep('product1');
-    setProduct1Selections([]);
-    setProduct2Selections([]);
+    setWizardStep('container');
+    setContainerElement(null);
+    setLabeledItems(new Map<string, { role: SelectorRole; priority: number }>());
+    setItemContainerSelector('');
     clearSelectedElements();
     clearPatternHighlight();
   }, [clearSelectedElements, clearPatternHighlight]);
 
-  // Add selection for current product
-  const addProductSelection = useCallback((role: SelectorRole, extractionType: string) => {
+  // Set container element and request server extraction
+  const setContainer = useCallback(() => {
     if (!selectedElement) return;
+    setContainerElement(selectedElement);
 
-    if (wizardStep === 'product1') {
-      // Check if role already selected for product 1
-      if (product1Selections.some(s => s.role === role)) {
-        // Replace existing
-        setProduct1Selections(prev => prev.map(s => s.role === role ? { role, element: selectedElement, extractionType } : s));
+    // Use the cssGeneric or css as the container selector
+    const containerCss = selectedElement.cssGeneric || selectedElement.css;
+    setItemContainerSelector(containerCss);
+
+    // Request content extraction from server
+    if (extractContainerContent) {
+      extractContainerContent(containerCss);
+    }
+
+    setWizardStep('labeling');
+  }, [selectedElement, extractContainerContent]);
+
+  // Get count of items with a specific role (for fallback numbering)
+  const getRoleCount = useCallback((role: SelectorRole) => {
+    let count = 0;
+    for (const [, item] of labeledItems) {
+      if (item.role === role) count++;
+    }
+    return count;
+  }, [labeledItems]);
+
+  // Label an extracted item - allows multiple items per role as fallbacks
+  const labelItem = useCallback((itemValue: string, role: SelectorRole | null) => {
+    setLabeledItems(prev => {
+      const newMap = new Map(prev);
+      if (role === null) {
+        // Remove label
+        newMap.delete(itemValue);
       } else {
-        setProduct1Selections(prev => [...prev, { role, element: selectedElement, extractionType }]);
-      }
-    } else if (wizardStep === 'product2') {
-      // Check if role already selected for product 2
-      if (product2Selections.some(s => s.role === role)) {
-        setProduct2Selections(prev => prev.map(s => s.role === role ? { role, element: selectedElement, extractionType } : s));
-      } else {
-        setProduct2Selections(prev => [...prev, { role, element: selectedElement, extractionType }]);
-      }
-    }
-  }, [selectedElement, wizardStep, product1Selections, product2Selections]);
-
-  // Move to next step
-  const goToProduct2 = useCallback(() => {
-    if (product1Selections.length >= 2) {
-      setWizardStep('product2');
-    }
-  }, [product1Selections]);
-
-  // Find common CSS selector pattern between two elements
-  const findCommonSelector = useCallback((el1: ElementSelector, el2: ElementSelector): string | null => {
-    // Priority 1: If both have cssGeneric and they match exactly, use that
-    if (el1.cssGeneric && el2.cssGeneric && el1.cssGeneric === el2.cssGeneric) {
-      return el1.cssGeneric;
-    }
-
-    // Priority 2: Use cssGeneric from either element if available
-    // cssGeneric is specifically designed to match multiple similar elements
-    if (el1.cssGeneric) {
-      return el1.cssGeneric;
-    }
-    if (el2.cssGeneric) {
-      return el2.cssGeneric;
-    }
-
-    // Priority 3: Try to find common class-based selector
-    const classes1 = el1.attributes?.class?.split(' ').filter(Boolean) || [];
-    const classes2 = el2.attributes?.class?.split(' ').filter(Boolean) || [];
-    const commonClasses = classes1.filter(c => classes2.includes(c));
-
-    if (commonClasses.length > 0 && el1.tagName === el2.tagName) {
-      // Build a selector from common classes - filter out state classes
-      const meaningfulClasses = commonClasses.filter(c =>
-        !c.startsWith('is-') &&
-        !c.startsWith('has-') &&
-        !c.includes('active') &&
-        !c.includes('hover') &&
-        !c.includes('focus')
-      );
-
-      if (meaningfulClasses.length > 0) {
-        const classSelector = meaningfulClasses.map(c => `.${c}`).join('');
-        return `${el1.tagName.toLowerCase()}${classSelector}`;
-      }
-    }
-
-    // Priority 4: Fallback to tag name only if same tag
-    if (el1.tagName === el2.tagName) {
-      return el1.tagName.toLowerCase();
-    }
-
-    return null;
-  }, []);
-
-  // Complete wizard and assign selectors
-  const completeWizard = useCallback(() => {
-    console.log('[Wizard] Completing wizard with selections:');
-    console.log('[Wizard] Product 1:', product1Selections.map(s => ({ role: s.role, css: s.element.css, cssGeneric: s.element.cssGeneric })));
-    console.log('[Wizard] Product 2:', product2Selections.map(s => ({ role: s.role, css: s.element.css, cssGeneric: s.element.cssGeneric })));
-
-    // For each role selected in both products, find common pattern and assign
-    product1Selections.forEach(p1Sel => {
-      const p2Sel = product2Selections.find(s => s.role === p1Sel.role);
-      if (p2Sel) {
-        // Find common selector between the two elements
-        const commonSelector = findCommonSelector(p1Sel.element, p2Sel.element);
-        console.log(`[Wizard] Role ${p1Sel.role}: commonSelector = "${commonSelector}"`);
-
-        if (commonSelector) {
-          // Create element with the common pattern selector
-          const patternElement: ElementSelector = {
-            ...p1Sel.element,
-            css: commonSelector,
-          };
-          assignSelector(p1Sel.role, patternElement, p1Sel.extractionType);
+        // Check if this item already has this role - if so, remove it
+        const existing = newMap.get(itemValue);
+        if (existing && existing.role === role) {
+          newMap.delete(itemValue);
         } else {
-          // Fallback: use the cssGeneric from first element if available
-          console.log(`[Wizard] Role ${p1Sel.role}: No common selector, trying cssGeneric fallback`);
-          if (p1Sel.element.cssGeneric) {
-            const patternElement: ElementSelector = {
-              ...p1Sel.element,
-              css: p1Sel.element.cssGeneric,
-            };
-            assignSelector(p1Sel.role, patternElement, p1Sel.extractionType);
-          } else {
-            console.warn(`[Wizard] Role ${p1Sel.role}: No selector could be generated!`);
+          // Add with next priority number for this role
+          let maxPriority = 0;
+          for (const [, item] of newMap) {
+            if (item.role === role && item.priority >= maxPriority) {
+              maxPriority = item.priority + 1;
+            }
           }
+          newMap.set(itemValue, { role, priority: maxPriority });
         }
       }
+      return newMap;
     });
+  }, []);
+
+  // Complete wizard and assign selectors from labeled items
+  const completeWizard = useCallback(() => {
+    console.log('[Wizard] Completing with labeled items:', Array.from(labeledItems.entries()));
+
+    // For each labeled item, create a selector with its priority
+    for (const [itemValue, { role, priority }] of labeledItems) {
+      const item = extractedItems.find(e => e.value === itemValue);
+      if (!item) continue;
+
+      // Determine extraction type based on item type
+      let extractionType = 'text';
+      let selector = item.selector;
+
+      if (item.type === 'link') {
+        extractionType = 'href';
+        selector = 'a';
+      } else if (item.type === 'image') {
+        extractionType = 'src';
+        selector = 'img';
+      }
+
+      // Create a selector element
+      const selectorElement: ElementSelector = {
+        tagName: item.type === 'link' ? 'A' : item.type === 'image' ? 'IMG' : 'SPAN',
+        css: selector,
+        xpath: '',
+        text: item.type === 'text' ? item.value : undefined,
+        attributes: {},
+        boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+      };
+
+      assignSelector(role, selectorElement, extractionType, priority);
+    }
 
     setWizardStep('complete');
-  }, [product1Selections, product2Selections, findCommonSelector, assignSelector]);
+  }, [labeledItems, extractedItems, assignSelector]);
 
   const togglePanel = useCallback((panel: keyof typeof expandedPanels) => {
     setExpandedPanels((prev) => ({ ...prev, [panel]: !prev[panel] }));
   }, []);
 
-  // Get assigned selector for a role
-  const getAssigned = useCallback(
-    (role: SelectorRole) => assignedSelectors.find((s) => s.role === role),
+  // Get all assigned selectors for a role (sorted by priority)
+  const getAssignedAll = useCallback(
+    (role: SelectorRole) => assignedSelectors
+      .filter((s) => s.role === role)
+      .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0)),
     [assignedSelectors]
+  );
+
+  // Get primary assigned selector for a role (lowest priority)
+  const getAssigned = useCallback(
+    (role: SelectorRole) => {
+      const all = getAssignedAll(role);
+      return all.length > 0 ? all[0] : undefined;
+    },
+    [getAssignedAll]
   );
 
   // Test selector
@@ -377,11 +387,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="panel">
             <div className="panel-header">
               <span className="panel-title">
-                {wizardStep === 'product1' && 'Step 1: Select Product 1'}
-                {wizardStep === 'product2' && 'Step 2: Select Product 2'}
+                {wizardStep === 'container' && 'Step 1: Select Product Card'}
+                {wizardStep === 'labeling' && 'Step 2: Label Fields'}
                 {wizardStep === 'complete' && 'Selection Complete'}
               </span>
-              {(product1Selections.length > 0 || product2Selections.length > 0) && wizardStep !== 'complete' && (
+              {(containerElement || labeledItems.size > 0) && wizardStep !== 'complete' && (
                 <button
                   className="btn btn-danger"
                   onClick={resetWizard}
@@ -402,18 +412,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   flex: 1,
                   height: 4,
                   borderRadius: 2,
-                  background: wizardStep === 'product1' ? 'var(--accent-primary)' : 'var(--accent-success)'
+                  background: wizardStep === 'container' ? 'var(--accent-primary)' : 'var(--accent-success)'
                 }} />
                 <div style={{
                   flex: 1,
                   height: 4,
                   borderRadius: 2,
-                  background: wizardStep === 'product2' ? 'var(--accent-primary)' : wizardStep === 'complete' ? 'var(--accent-success)' : 'var(--bg-tertiary)'
+                  background: wizardStep === 'labeling' ? 'var(--accent-primary)' : wizardStep === 'complete' ? 'var(--accent-success)' : 'var(--bg-tertiary)'
                 }} />
               </div>
 
               {/* Instructions based on step */}
-              {wizardStep === 'product1' && (
+              {wizardStep === 'container' && (
+                <div style={{
+                  padding: 8,
+                  background: 'rgba(138, 43, 226, 0.1)',
+                  borderRadius: 4,
+                  border: '1px solid #8a2be2',
+                  marginBottom: 12
+                }}>
+                  <p style={{ fontSize: 11, color: 'var(--text-primary)', margin: 0 }}>
+                    <strong>Step 1:</strong> Click on the <strong>entire product card</strong>.
+                    This is the box containing one product's info (title, price, image, etc.)
+                  </p>
+                </div>
+              )}
+
+              {wizardStep === 'labeling' && (
                 <div style={{
                   padding: 8,
                   background: 'rgba(0, 153, 255, 0.1)',
@@ -422,23 +447,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   marginBottom: 12
                 }}>
                   <p style={{ fontSize: 11, color: 'var(--text-primary)', margin: 0 }}>
-                    <strong>Step 1:</strong> Select elements from the <strong>first product</strong>.
-                    Click on the title, price, image, or URL - then assign each one below.
-                  </p>
-                </div>
-              )}
-
-              {wizardStep === 'product2' && (
-                <div style={{
-                  padding: 8,
-                  background: 'rgba(255, 170, 0, 0.1)',
-                  borderRadius: 4,
-                  border: '1px solid var(--accent-warning)',
-                  marginBottom: 12
-                }}>
-                  <p style={{ fontSize: 11, color: 'var(--text-primary)', margin: 0 }}>
-                    <strong>Step 2:</strong> Now select the <strong>same fields</strong> from a <strong>second product</strong>.
-                    This helps detect the pattern across all products.
+                    <strong>Step 2:</strong> Label each field below. Click on a field to identify what it is (title, price, etc.)
                   </p>
                 </div>
               )}
@@ -452,8 +461,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   marginBottom: 12
                 }}>
                   <p style={{ fontSize: 11, color: 'var(--text-primary)', margin: 0 }}>
-                    <strong>Done!</strong> Selectors have been assigned. You can now run the scraper
-                    or add more selectors by starting over.
+                    <strong>Done!</strong> Selectors have been assigned. You can now run the scraper.
                   </p>
                   <button
                     className="btn"
@@ -465,8 +473,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </div>
               )}
 
-              {/* Currently hovered element - assign buttons */}
-              {selectedElement && wizardStep !== 'complete' && (
+              {/* Container step - show selected element and confirm button */}
+              {wizardStep === 'container' && selectedElement && (
                 <div style={{
                   padding: 8,
                   background: 'var(--bg-tertiary)',
@@ -474,158 +482,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   marginBottom: 12
                 }}>
                   <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                    Currently selected:
+                    Selected container:
                   </div>
-                  <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    "{selectedElement.text?.substring(0, 40) || selectedElement.tagName}"
+                  <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>
+                    &lt;{selectedElement.tagName.toLowerCase()}&gt;
                   </div>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {SELECTOR_ROLES.filter(r => r.role !== 'nextPage').map(({ role, label, extractionType }) => {
-                      const currentSelections = wizardStep === 'product1' ? product1Selections : product2Selections;
-                      const isSelected = currentSelections.some(s => s.role === role);
-                      // In product2, only show roles that were selected in product1
-                      if (wizardStep === 'product2' && !product1Selections.some(s => s.role === role)) {
-                        return null;
-                      }
-                      return (
-                        <button
-                          key={role}
-                          className={`btn ${isSelected ? 'btn-success' : 'btn-primary'}`}
-                          onClick={() => addProductSelection(role, extractionType)}
-                          style={{ padding: '4px 8px', fontSize: 11 }}
-                        >
-                          {isSelected ? '✓ ' : ''}{label}
-                        </button>
-                      );
-                    })}
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 8, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                    {selectedElement.cssGeneric || selectedElement.css}
                   </div>
+                  <button
+                    className="btn btn-success"
+                    onClick={setContainer}
+                    style={{ width: '100%' }}
+                  >
+                    Extract Fields From This Card
+                  </button>
                 </div>
               )}
 
-              {/* Show selections for current step */}
-              {wizardStep === 'product1' && product1Selections.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                    Product 1 selections:
-                  </div>
-                  {product1Selections.map((sel, idx) => (
-                    <div key={idx} style={{
-                      padding: '4px 8px',
-                      background: 'rgba(0, 204, 102, 0.1)',
-                      borderRadius: 4,
-                      marginBottom: 4,
-                      fontSize: 11,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      border: '1px solid var(--accent-success)'
-                    }}>
-                      <span style={{ color: 'var(--accent-success)', fontWeight: 600 }}>{sel.role}:</span>
-                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {sel.element.text?.substring(0, 30) || sel.element.css}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {wizardStep === 'product2' && (
-                <>
-                  <div style={{ marginBottom: 12 }}>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
-                      Product 1 (reference):
-                    </div>
-                    {product1Selections.map((sel, idx) => (
-                      <div key={idx} style={{
-                        padding: '4px 8px',
-                        background: 'var(--bg-tertiary)',
-                        borderRadius: 4,
-                        marginBottom: 4,
-                        fontSize: 10,
-                        opacity: 0.7
-                      }}>
-                        <span style={{ color: 'var(--text-secondary)' }}>{sel.role}:</span>{' '}
-                        {sel.element.text?.substring(0, 25) || '...'}
-                      </div>
-                    ))}
-                  </div>
-                  {product2Selections.length > 0 && (
-                    <div style={{ marginBottom: 12 }}>
-                      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                        Product 2 selections:
-                      </div>
-                      {product2Selections.map((sel, idx) => (
-                        <div key={idx} style={{
-                          padding: '4px 8px',
-                          background: 'rgba(255, 170, 0, 0.1)',
-                          borderRadius: 4,
-                          marginBottom: 4,
-                          fontSize: 11,
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          border: '1px solid var(--accent-warning)'
-                        }}>
-                          <span style={{ color: 'var(--accent-warning)', fontWeight: 600 }}>{sel.role}:</span>
-                          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {sel.element.text?.substring(0, 30) || sel.element.css}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* Navigation buttons */}
-              {wizardStep === 'product1' && product1Selections.length >= 2 && (
-                <button
-                  className="btn btn-warning"
-                  onClick={goToProduct2}
-                  style={{ width: '100%' }}
-                >
-                  Next: Select Product 2 →
-                </button>
-              )}
-
-              {wizardStep === 'product1' && product1Selections.length < 2 && product1Selections.length > 0 && (
-                <div style={{
-                  padding: 8,
-                  background: 'var(--bg-tertiary)',
-                  borderRadius: 4,
-                  textAlign: 'center',
-                  fontSize: 11,
-                  color: 'var(--text-secondary)'
-                }}>
-                  Select at least {2 - product1Selections.length} more field{2 - product1Selections.length > 1 ? 's' : ''} (e.g., title and price)
-                </div>
-              )}
-
-              {wizardStep === 'product2' && product2Selections.length >= product1Selections.length && (
-                <button
-                  className="btn btn-success"
-                  onClick={completeWizard}
-                  style={{ width: '100%' }}
-                >
-                  ✓ Confirm & Apply Selectors
-                </button>
-              )}
-
-              {wizardStep === 'product2' && product2Selections.length < product1Selections.length && (
-                <div style={{
-                  padding: 8,
-                  background: 'var(--bg-tertiary)',
-                  borderRadius: 4,
-                  textAlign: 'center',
-                  fontSize: 11,
-                  color: 'var(--text-secondary)'
-                }}>
-                  Select {product1Selections.length - product2Selections.length} more field{product1Selections.length - product2Selections.length > 1 ? 's' : ''} to match Product 1
-                </div>
-              )}
-
-              {/* No selection yet prompt */}
-              {!selectedElement && wizardStep !== 'complete' && (
+              {/* Container step - no selection yet */}
+              {wizardStep === 'container' && !selectedElement && (
                 <div style={{
                   padding: 12,
                   background: 'var(--bg-tertiary)',
@@ -634,8 +510,149 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   fontSize: 12,
                   color: 'var(--text-secondary)'
                 }}>
-                  Click on an element in the browser to select it
+                  Click on a product card in the browser
                 </div>
+              )}
+
+              {/* Labeling step - show extracted content */}
+              {wizardStep === 'labeling' && (
+                <>
+                  {/* Container info */}
+                  <div style={{
+                    padding: '6px 8px',
+                    background: 'rgba(138, 43, 226, 0.1)',
+                    borderRadius: 4,
+                    marginBottom: 12,
+                    fontSize: 10,
+                    border: '1px solid #8a2be2'
+                  }}>
+                    <span style={{ color: '#8a2be2', fontWeight: 600 }}>Container:</span>{' '}
+                    <span style={{ fontFamily: 'monospace' }}>{itemContainerSelector}</span>
+                  </div>
+
+                  {/* Extracted items list */}
+                  {extractedItems.length > 0 ? (
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                        Click labels to assign fields. Assign the same label multiple times for fallbacks (first = primary, others = fallback if null):
+                      </div>
+                      {extractedItems.map((item, idx) => {
+                        const assigned = labeledItems.get(item.value);
+                        const assignedRole = assigned?.role;
+                        const assignedPriority = assigned?.priority ?? -1;
+                        return (
+                          <div key={idx} style={{
+                            padding: 8,
+                            background: assignedRole ? 'rgba(0, 204, 102, 0.1)' : 'var(--bg-tertiary)',
+                            borderRadius: 4,
+                            marginBottom: 8,
+                            border: assignedRole ? '1px solid var(--accent-success)' : '1px solid var(--border-color)'
+                          }}>
+                            {/* Item type indicator */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                              <span style={{
+                                padding: '2px 6px',
+                                borderRadius: 3,
+                                fontSize: 9,
+                                fontWeight: 600,
+                                background: item.type === 'text' ? 'var(--accent-primary)' :
+                                           item.type === 'link' ? 'var(--accent-warning)' : 'var(--accent-success)',
+                                color: 'white'
+                              }}>
+                                {item.type.toUpperCase()}
+                              </span>
+                              {assignedRole && (
+                                <span style={{
+                                  padding: '2px 6px',
+                                  borderRadius: 3,
+                                  fontSize: 9,
+                                  fontWeight: 600,
+                                  background: 'var(--accent-success)',
+                                  color: 'white'
+                                }}>
+                                  = {assignedRole.toUpperCase()}{assignedPriority > 0 ? ` (fallback ${assignedPriority})` : ''}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Item value */}
+                            <div style={{
+                              fontSize: 12,
+                              marginBottom: 8,
+                              padding: 6,
+                              background: 'var(--bg-secondary)',
+                              borderRadius: 3,
+                              fontFamily: item.type !== 'text' ? 'monospace' : 'inherit',
+                              wordBreak: 'break-all',
+                              maxHeight: 60,
+                              overflow: 'auto'
+                            }}>
+                              {item.displayText}
+                            </div>
+
+                            {/* Label buttons */}
+                            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                              {SELECTOR_ROLES.filter(r => r.role !== 'nextPage').map(({ role, label }) => {
+                                const isThisRole = assignedRole === role;
+                                // Count how many items have this role (for showing fallback count)
+                                const roleCount = getRoleCount(role);
+                                return (
+                                  <button
+                                    key={role}
+                                    className={`btn ${isThisRole ? 'btn-success' : 'btn-primary'}`}
+                                    onClick={() => labelItem(item.value, isThisRole ? null : role)}
+                                    style={{
+                                      padding: '3px 8px',
+                                      fontSize: 10,
+                                    }}
+                                    title={isThisRole ? 'Click to remove' : roleCount > 0 ? `Add as ${label} fallback #${roleCount + 1}` : `Mark as ${label}`}
+                                  >
+                                    {isThisRole ? '✓ ' : ''}{label}{!isThisRole && roleCount > 0 ? ` +${roleCount}` : ''}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div style={{
+                      padding: 12,
+                      background: 'var(--bg-tertiary)',
+                      borderRadius: 4,
+                      textAlign: 'center',
+                      fontSize: 12,
+                      color: 'var(--text-secondary)'
+                    }}>
+                      No content extracted from container. Try selecting a different card.
+                    </div>
+                  )}
+
+                  {/* Complete button */}
+                  {labeledItems.size > 0 && (
+                    <button
+                      className="btn btn-success"
+                      onClick={completeWizard}
+                      style={{ width: '100%' }}
+                    >
+                      Apply {labeledItems.size} Label{labeledItems.size > 1 ? 's' : ''} & Continue
+                    </button>
+                  )}
+
+                  {labeledItems.size === 0 && extractedItems.length > 0 && (
+                    <div style={{
+                      padding: 8,
+                      background: 'var(--bg-tertiary)',
+                      borderRadius: 4,
+                      textAlign: 'center',
+                      fontSize: 11,
+                      color: 'var(--text-secondary)'
+                    }}>
+                      Label at least one field to continue
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -650,21 +667,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="panel-content">
             <div className="selector-list">
               {SELECTOR_ROLES.map(({ role, label }) => {
-                const assigned = getAssigned(role);
+                const allAssigned = getAssignedAll(role);
                 return (
-                  <div key={role} className={`selector-item ${assigned ? 'assigned' : ''}`}>
-                    <div className="selector-label">{label}</div>
-                    {assigned ? (
-                      <>
-                        <div className="selector-value">{assigned.selector.css}</div>
-                        <button
-                          className="btn btn-danger"
-                          onClick={() => removeSelector(role)}
-                          style={{ padding: '4px 8px', fontSize: 11, alignSelf: 'flex-start' }}
-                        >
-                          Remove
-                        </button>
-                      </>
+                  <div key={role} className={`selector-item ${allAssigned.length > 0 ? 'assigned' : ''}`}>
+                    <div className="selector-label">
+                      {label}
+                      {allAssigned.length > 1 && (
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>
+                          ({allAssigned.length} with fallbacks)
+                        </span>
+                      )}
+                    </div>
+                    {allAssigned.length > 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                        {allAssigned.map((assigned, idx) => (
+                          <div key={idx} style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            padding: '4px 6px',
+                            background: idx === 0 ? 'var(--bg-tertiary)' : 'var(--bg-secondary)',
+                            borderRadius: 3,
+                            border: idx === 0 ? '1px solid var(--accent-success)' : '1px dashed var(--border-color)'
+                          }}>
+                            <span style={{
+                              fontSize: 9,
+                              color: idx === 0 ? 'var(--accent-success)' : 'var(--text-muted)',
+                              fontWeight: 600,
+                              minWidth: 50
+                            }}>
+                              {idx === 0 ? 'PRIMARY' : `FB #${idx}`}
+                            </span>
+                            <div className="selector-value" style={{ flex: 1, margin: 0 }}>
+                              {assigned.selector.css}
+                            </div>
+                            <button
+                              className="btn btn-danger"
+                              onClick={() => removeSelector(role, assigned.priority)}
+                              style={{ padding: '2px 6px', fontSize: 10 }}
+                              title={`Remove ${idx === 0 ? 'primary' : `fallback #${idx}`}`}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                     ) : (
                       <div className="selector-value empty">Not assigned</div>
                     )}
@@ -676,14 +723,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
             {/* Item Container */}
             <div style={{ marginTop: 16 }}>
               <div className="form-group">
-                <label className="form-label">Item Container (optional)</label>
+                <label className="form-label">
+                  Item Container <span style={{ color: 'var(--accent-error)' }}>*</span>
+                </label>
                 <input
                   type="text"
                   className="form-input"
-                  placeholder=".product-card, .item, etc."
+                  placeholder="Select in wizard or enter CSS selector"
                   value={itemContainerSelector}
                   onChange={(e) => setItemContainerSelector(e.target.value)}
+                  style={{
+                    borderColor: itemContainerSelector ? 'var(--accent-success)' : 'var(--accent-warning)',
+                  }}
                 />
+                {!itemContainerSelector && (
+                  <div style={{ fontSize: 10, color: 'var(--accent-warning)', marginTop: 4 }}>
+                    Required: Use the wizard above to select a product card
+                  </div>
+                )}
               </div>
             </div>
 
@@ -846,14 +903,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             className="btn btn-success"
             onClick={handleExecuteScrape}
-            disabled={assignedSelectors.length === 0 || isScrapingRunning}
+            disabled={assignedSelectors.length === 0 || !itemContainerSelector || isScrapingRunning}
             style={{ flex: onSaveScraper ? 1 : undefined, width: onSaveScraper ? undefined : '100%', padding: '12px 16px', fontSize: 14 }}
+            title={!itemContainerSelector ? 'Please select an item container first' : assignedSelectors.length === 0 ? 'Please assign at least one selector' : ''}
           >
             {isScrapingRunning ? (
               <>
                 <div className="loading-spinner" style={{ width: 16, height: 16 }} />
                 Scraping...
               </>
+            ) : !itemContainerSelector ? (
+              'Select Container First'
             ) : (
               'Execute Scrape'
             )}

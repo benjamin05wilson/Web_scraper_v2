@@ -1,4 +1,4 @@
-export type WSMessageType = 'session:create' | 'session:created' | 'session:destroy' | 'session:error' | 'navigate' | 'navigate:complete' | 'input:mouse' | 'input:keyboard' | 'input:scroll' | 'dom:hover' | 'dom:highlight' | 'dom:select' | 'dom:selected' | 'selector:test' | 'selector:result' | 'selector:findPattern' | 'selector:pattern' | 'selector:highlightAll' | 'selector:highlighted' | 'selector:clearHighlight' | 'recorder:start' | 'recorder:stop' | 'recorder:action' | 'scrape:configure' | 'scrape:execute' | 'scrape:result' | 'scrape:error' | 'webrtc:offer' | 'webrtc:answer' | 'webrtc:ice';
+export type WSMessageType = 'session:create' | 'session:created' | 'session:destroy' | 'session:error' | 'navigate' | 'navigate:complete' | 'input:mouse' | 'input:keyboard' | 'input:scroll' | 'dom:hover' | 'dom:highlight' | 'dom:select' | 'dom:selected' | 'selector:test' | 'selector:result' | 'selector:findPattern' | 'selector:pattern' | 'selector:highlightAll' | 'selector:highlighted' | 'selector:clearHighlight' | 'recorder:start' | 'recorder:stop' | 'recorder:action' | 'scrape:configure' | 'scrape:execute' | 'scrape:result' | 'scrape:error' | 'webrtc:offer' | 'webrtc:answer' | 'webrtc:ice' | 'url:hover' | 'url:captured' | 'url:history' | 'container:extract' | 'container:content';
 export interface WSMessage<T = unknown> {
     type: WSMessageType;
     sessionId?: string;
@@ -76,13 +76,25 @@ export interface DOMHighlight {
     className?: string;
     id?: string;
 }
-export type SelectorRole = 'title' | 'price' | 'url' | 'nextPage' | 'image' | 'custom';
+export interface ExtractedContentItem {
+    type: 'text' | 'link' | 'image';
+    value: string;
+    selector: string;
+    displayText: string;
+    tagName?: string;
+}
+export interface ContainerContentPayload {
+    items: ExtractedContentItem[];
+    containerSelector: string;
+}
+export type SelectorRole = 'title' | 'price' | 'originalPrice' | 'salePrice' | 'url' | 'nextPage' | 'image' | 'custom';
 export interface AssignedSelector {
     role: SelectorRole;
     selector: ElementSelector;
     customName?: string;
     extractionType: 'text' | 'attribute' | 'href' | 'src' | 'innerHTML';
     attributeName?: string;
+    priority?: number;
 }
 export type RecorderActionType = 'click' | 'type' | 'scroll' | 'select' | 'wait';
 export interface RecorderAction {
@@ -175,6 +187,7 @@ export interface SavedScraper {
     createdAt: number;
     updatedAt: number;
     lastRunAt?: number;
+    isTemplate?: boolean;
 }
 export interface SavedScrapeResult {
     id: string;
@@ -191,5 +204,17 @@ export interface AppSettings {
     sidebarWidth: number;
     defaultExportFormat: ExportFormat;
 }
-export type ExtendedSelectorRole = 'title' | 'price' | 'url' | 'nextPage' | 'image' | 'description' | 'rating' | 'sku' | 'availability' | 'category' | 'custom';
+export type ExtendedSelectorRole = 'title' | 'price' | 'originalPrice' | 'salePrice' | 'url' | 'nextPage' | 'image' | 'description' | 'rating' | 'sku' | 'availability' | 'category' | 'custom';
+export interface CapturedUrl {
+    url: string;
+    text?: string;
+    title?: string;
+    timestamp: number;
+}
+export interface UrlHoverPayload {
+    url: string;
+    text?: string;
+    x: number;
+    y: number;
+}
 //# sourceMappingURL=types.d.ts.map
