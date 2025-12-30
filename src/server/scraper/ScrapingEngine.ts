@@ -29,20 +29,42 @@ export class ScrapingEngine {
     const startTime = Date.now();
     const allItems: ScrapedItem[] = [];
     let pagesScraped = 0;
+    const targetProducts = config.targetProducts || 0; // 0 = unlimited
+
+    // Ensure selectors is always an array
+    const selectors = Array.isArray(config.selectors) ? config.selectors : [];
 
     console.log(`[ScrapingEngine] Starting scrape: ${config.name}`);
     console.log(`[ScrapingEngine] URL: ${config.startUrl}`);
-    console.log(`[ScrapingEngine] Selectors: ${config.selectors.length}`);
+    console.log(`[ScrapingEngine] Selectors: ${selectors.length}`);
+    console.log(`[ScrapingEngine] Target products: ${targetProducts || 'unlimited'}`);
+
+    // Validate we have at least one selector
+    if (selectors.length === 0) {
+      console.error('[ScrapingEngine] No selectors configured');
+      return {
+        success: false,
+        items: [],
+        pagesScraped: 0,
+        duration: Date.now() - startTime,
+        errors: ['No selectors configured. Please configure selectors in the Builder first.'],
+      };
+    }
+
+    // Use normalized selectors throughout
+    config = { ...config, selectors };
 
     try {
       // Inject IntersectionObserver override BEFORE navigation to catch all lazy loaders
       await this.injectLazyLoadBlocker();
 
       // Navigate to start URL
+      console.log(`[ScrapingEngine] Navigating to: ${config.startUrl}`);
       await this.page.goto(config.startUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 30000,
       });
+      console.log(`[ScrapingEngine] Navigation complete, current URL: ${this.page.url()}`);
 
       // Execute pre-actions (popups, cookies, etc.) if defined
       if (config.preActions && config.preActions.actions.length > 0) {
@@ -67,7 +89,15 @@ export class ScrapingEngine {
         allItems.push(...pageItems);
         pagesScraped++;
 
-        console.log(`[ScrapingEngine] Extracted ${pageItems.length} items from page ${pageNum + 1}`);
+        console.log(`[ScrapingEngine] Extracted ${pageItems.length} items from page ${pageNum + 1} (total: ${allItems.length})`);
+
+        // Check if we've reached target products
+        if (targetProducts > 0 && allItems.length >= targetProducts) {
+          console.log(`[ScrapingEngine] Reached target of ${targetProducts} products, stopping`);
+          // Truncate to exact target
+          allItems.length = targetProducts;
+          break;
+        }
 
         // Check for pagination
         if (config.pagination?.enabled && pageNum < maxPages - 1) {
@@ -84,6 +114,12 @@ export class ScrapingEngine {
         }
       }
 
+      // Final truncation in case we went over on the last page
+      if (targetProducts > 0 && allItems.length > targetProducts) {
+        console.log(`[ScrapingEngine] Truncating ${allItems.length} items to target ${targetProducts}`);
+        allItems.length = targetProducts;
+      }
+
       return {
         success: true,
         items: allItems,
@@ -93,6 +129,9 @@ export class ScrapingEngine {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[ScrapingEngine] FATAL: ${errorMessage}`);
+      if (error instanceof Error && error.stack) {
+        console.error(`[ScrapingEngine] Stack trace:`, error.stack);
+      }
 
       return {
         success: false,
@@ -123,6 +162,16 @@ export class ScrapingEngine {
     containerSelector: string,
     selectors: AssignedSelector[]
   ): Promise<ScrapedItem[]> {
+    // Check if this is Zara's split layout (comma-separated selectors for image + info cards)
+    // For Zara, we need to pair image cards with info cards by index, not treat them as separate containers
+    const isZaraSplitLayout = containerSelector.includes('li.product-grid-product[data-productid]') &&
+                               containerSelector.includes('li.product-grid-block-dynamic__product-info');
+
+    if (isZaraSplitLayout) {
+      console.log('[ScrapingEngine] Detected Zara split layout - using paired extraction');
+      return this.extractFromZaraSplitLayout(selectors);
+    }
+
     // Use CDP Runtime.evaluate for maximum speed
     const result = await this.cdp.send('Runtime.evaluate', {
       expression: `
@@ -173,10 +222,77 @@ export class ScrapingEngine {
             return prices[0].original;
           }
 
-          var containers = document.querySelectorAll(${JSON.stringify(containerSelector)});
-          if (containers.length === 0) {
-            throw new Error('No containers found for selector: ${containerSelector}');
+          // Try to find containers - handle selectors with special chars like @, /
+          var containerSelector = ${JSON.stringify(containerSelector)};
+          var containers = [];
+
+          // Check if selector has special chars that need class-based matching
+          // Check for both escaped (\@, \/) and unescaped (@, /) versions
+          var hasSpecialChars = containerSelector.indexOf('@') !== -1 ||
+                                containerSelector.indexOf('/') !== -1;
+
+          if (!hasSpecialChars) {
+            // Normal selector - try querySelector directly
+            try {
+              containers = document.querySelectorAll(containerSelector);
+            } catch (e) {
+              // Will fall through to class-based matching
+            }
           }
+
+          // If no results or has special chars, use class-based matching
+          if (!containers || containers.length === 0) {
+            // Parse selector: tag.class1.class2.class3
+            // First unescape any CSS escape sequences for class matching
+            // In browser JS, containerSelector has single backslashes like \\@ which we need to remove
+            console.log('[ScrapingEngine] Original selector:', containerSelector);
+            console.log('[ScrapingEngine] hasSpecialChars:', hasSpecialChars);
+            var unescapedSelector = containerSelector.replace(/\\\\(.)/g, '$1');
+            console.log('[ScrapingEngine] Unescaped selector:', unescapedSelector);
+            var dotIndex = unescapedSelector.indexOf('.');
+            if (dotIndex > 0) {
+              var tag = unescapedSelector.substring(0, dotIndex);
+              var classStr = unescapedSelector.substring(dotIndex + 1);
+              // Split by dots to get individual class names
+              var classes = classStr.split('.').filter(Boolean);
+
+              console.log('[ScrapingEngine] Class-based matching: tag=' + tag + ', classes=' + JSON.stringify(classes));
+
+              // Find all elements of the tag type
+              var candidates = document.querySelectorAll(tag);
+              console.log('[ScrapingEngine] Found ' + candidates.length + ' ' + tag + ' elements');
+
+              // Log first candidate's classes for debugging
+              if (candidates.length > 0) {
+                console.log('[ScrapingEngine] First candidate classes:', Array.from(candidates[0].classList));
+              }
+
+              containers = [];
+
+              for (var i = 0; i < candidates.length; i++) {
+                // Check if element has ALL the required classes
+                var hasAll = true;
+                for (var j = 0; j < classes.length; j++) {
+                  if (!candidates[i].classList.contains(classes[j])) {
+                    hasAll = false;
+                    break;
+                  }
+                }
+                if (hasAll) {
+                  containers.push(candidates[i]);
+                }
+              }
+
+              console.log('[ScrapingEngine] Matched ' + containers.length + ' containers after class filtering');
+            }
+          }
+
+          if (!containers || containers.length === 0) {
+            throw new Error('No containers found for selector: ' + containerSelector);
+          }
+          // Convert NodeList to Array for consistent iteration
+          containers = Array.from(containers);
+          console.log('[ScrapingEngine] Found ' + containers.length + ' containers');
 
           var selectors = ${JSON.stringify(selectors)};
           var items = [];
@@ -223,7 +339,12 @@ export class ScrapingEngine {
                 }
                 break;
               case 'src':
-                value = el.getAttribute('src') || null;
+                // Try src first, then fall back to data-src for lazy-loaded images
+                value = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || null;
+                // Skip placeholder images (commonly used for lazy loading)
+                if (value && (value.includes('placeholder') || value.includes('loading') || value.includes('blank') || value.startsWith('data:image'))) {
+                  value = el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || null;
+                }
                 if (value && !value.startsWith('http')) {
                   value = new URL(value, window.location.origin).href;
                 }
@@ -250,11 +371,20 @@ export class ScrapingEngine {
               for (var i = 0; i < roleSelectors.length && !value; i++) {
                 var sel = roleSelectors[i];
                 var cssSelector = sel.selector.css;
-                var el = container.querySelector(cssSelector);
+                var el = null;
 
-                if (idx === 0) {
-                  // Debug first container
-                  console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Selector: "' + cssSelector + '", Found: ' + (el ? 'YES' : 'NO'));
+                // Special handling for :parent-link - look UP the DOM instead of down
+                if (cssSelector === ':parent-link') {
+                  el = container.closest('a[href]');
+                  if (idx === 0) {
+                    console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Using :parent-link (closest a[href]), Found: ' + (el ? 'YES' : 'NO'));
+                  }
+                } else {
+                  el = container.querySelector(cssSelector);
+                  if (idx === 0) {
+                    // Debug first container
+                    console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Selector: "' + cssSelector + '", Found: ' + (el ? 'YES' : 'NO'));
+                  }
                 }
 
                 if (el) {
@@ -281,6 +411,16 @@ export class ScrapingEngine {
               }
             }
 
+            // Skip items where title AND price are both null (likely non-product cards like banners/promos)
+            var hasTitle = item.title !== null && item.title !== undefined;
+            var hasPrice = item.price !== null && item.price !== undefined;
+            if (!hasTitle && !hasPrice) {
+              if (idx === 0) {
+                console.log('[ScrapingEngine] Skipping container #' + idx + ' - no title or price (likely not a product)');
+              }
+              return; // Skip this item
+            }
+
             items.push(item);
           });
 
@@ -292,7 +432,145 @@ export class ScrapingEngine {
     });
 
     if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.text || 'Extraction failed');
+      console.error('[ScrapingEngine] Exception details:', JSON.stringify(result.exceptionDetails, null, 2));
+      throw new Error(result.exceptionDetails.text || result.exceptionDetails.exception?.description || 'Extraction failed');
+    }
+
+    if (!result.result || result.result.value === undefined) {
+      console.error('[ScrapingEngine] No result value returned:', JSON.stringify(result, null, 2));
+      throw new Error('Extraction returned no data');
+    }
+
+    return result.result.value as ScrapedItem[];
+  }
+
+  // Special extraction for Zara's split layout where images and info are in separate rows
+  private async extractFromZaraSplitLayout(selectors: AssignedSelector[]): Promise<ScrapedItem[]> {
+    // Build a set of requested roles to only extract what the user selected
+    const requestedRoles = new Set(selectors.map(s => s.role));
+
+    const result = await this.cdp.send('Runtime.evaluate', {
+      expression: `
+        (function() {
+          var selectors = ${JSON.stringify(selectors)};
+          var requestedRoles = ${JSON.stringify([...requestedRoles])};
+
+          // Helper: Parse a price string to a number
+          function parsePrice(priceStr) {
+            if (!priceStr) return NaN;
+            var cleaned = priceStr.replace(/[£$€¥₹MAD\\s]/gi, '').replace(/,/g, '.');
+            var parts = cleaned.split('.');
+            if (parts.length > 2) {
+              cleaned = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
+            }
+            return parseFloat(cleaned);
+          }
+
+          // Check if a role was requested by the user
+          function isRoleRequested(role) {
+            return requestedRoles.indexOf(role) !== -1;
+          }
+
+          // Get all image cards and info cards
+          var imageCards = document.querySelectorAll('li.product-grid-product[data-productid]');
+          var infoCards = document.querySelectorAll('li.product-grid-block-dynamic__product-info');
+
+          console.log('[Zara] Found ' + imageCards.length + ' image cards and ' + infoCards.length + ' info cards');
+          console.log('[Zara] Requested roles: ' + requestedRoles.join(', '));
+
+          // Pair them by index
+          var items = [];
+          var numProducts = Math.min(imageCards.length, infoCards.length);
+
+          for (var i = 0; i < numProducts; i++) {
+            var imageCard = imageCards[i];
+            var infoCard = infoCards[i];
+            var item = {};
+
+            // Extract from image card: image src (only if user selected 'image')
+            if (isRoleRequested('image')) {
+              var img = imageCard.querySelector('img');
+              if (img) {
+                var src = img.getAttribute('src');
+                if (src) {
+                  if (!src.startsWith('http')) {
+                    src = new URL(src, window.location.origin).href;
+                  }
+                  item.image = src;
+                }
+              }
+            }
+
+            // Extract product link (only if user selected 'url')
+            if (isRoleRequested('url')) {
+              var link = imageCard.querySelector('a[href]');
+              if (link) {
+                var href = link.getAttribute('href');
+                if (href && !href.startsWith('#')) {
+                  if (!href.startsWith('http')) {
+                    href = new URL(href, window.location.origin).href;
+                  }
+                  item.url = href;
+                }
+              }
+            }
+
+            // Extract from info card: title (only if user selected 'title')
+            if (isRoleRequested('title')) {
+              var titleEl = infoCard.querySelector('.product-grid-product-info__name, [class*="product-name"], a');
+              if (titleEl) {
+                item.title = (titleEl.textContent || '').trim();
+              }
+            }
+
+            // Extract price (check for 'price', 'originalPrice' roles)
+            if (isRoleRequested('price') || isRoleRequested('originalPrice')) {
+              // Try user's configured selector first, then fall back to generic selectors
+              var priceSelector = selectors.find(function(s) { return s.role === 'price' || s.role === 'originalPrice'; });
+              var priceEl = null;
+              if (priceSelector && priceSelector.selector && priceSelector.selector.css) {
+                priceEl = infoCard.querySelector(priceSelector.selector.css);
+              }
+              // Fallback to generic price selectors
+              if (!priceEl) {
+                priceEl = infoCard.querySelector('.money-amount__main, .money-amount.money-amount--highlight span, [class*="price"], [class*="amount"]');
+              }
+              if (priceEl) {
+                var priceValue = (priceEl.textContent || '').trim();
+                // Use the role name that was requested
+                if (isRoleRequested('price')) {
+                  item.price = priceValue;
+                }
+                if (isRoleRequested('originalPrice')) {
+                  item.originalPrice = priceValue;
+                }
+              }
+            }
+
+            // Check for sale price (only if user selected 'salePrice')
+            if (isRoleRequested('salePrice')) {
+              var salePriceEl = infoCard.querySelector('.money-amount--is-discounted, [class*="sale"], [class*="discount"]');
+              if (salePriceEl) {
+                item.salePrice = (salePriceEl.textContent || '').trim();
+              }
+            }
+
+            // Only add if we have at least one extracted value
+            if (Object.keys(item).length > 0) {
+              items.push(item);
+            }
+          }
+
+          console.log('[Zara] Extracted ' + items.length + ' products with roles: ' + requestedRoles.join(', '));
+          return items;
+        })()
+      `,
+      returnByValue: true,
+      awaitPromise: false,
+    });
+
+    if (result.exceptionDetails) {
+      throw new Error(result.exceptionDetails.text || 'Zara extraction failed');
     }
 
     return result.result.value as ScrapedItem[];
@@ -422,6 +700,11 @@ export class ScrapingEngine {
             // Get ALL elements matching each selector
             const allElementsPerSelector = selectors.map(sel => {
               const selector = sel.selector.css;
+              // Skip :parent-link as it needs container context
+              if (selector === ':parent-link') {
+                console.log('[ScrapingEngine] Selector ":parent-link" skipped (needs container context)');
+                return { selector: sel, elements: [] };
+              }
               const elements = document.querySelectorAll(selector);
               console.log('[ScrapingEngine] Selector "' + selector + '" found: ' + elements.length + ' elements');
               return { selector: sel, elements: Array.from(elements) };
@@ -547,6 +830,11 @@ export class ScrapingEngine {
             // Fallback: Get first element from each selector
             const firstElements = selectors
               .map(sel => {
+                // Skip :parent-link as it needs container context
+                if (sel.selector.css === ':parent-link') {
+                  console.log('[ScrapingEngine] Selector ":parent-link" skipped (needs container context)');
+                  return null;
+                }
                 const el = document.querySelector(sel.selector.css);
                 console.log('[ScrapingEngine] Selector "' + sel.selector.css + '" found:', el ? 'YES (' + (el.textContent || '').substring(0, 30) + ')' : 'NO');
                 return el;
@@ -599,7 +887,13 @@ export class ScrapingEngine {
 
                 if (validMatches.length > 1 && validMatches.length < 200) {
                   const containersWithAllElements = validMatches.filter(c => {
-                    return selectors.every(sel => c.querySelector(sel.selector.css));
+                    return selectors.every(sel => {
+                      // Handle :parent-link by checking closest parent link
+                      if (sel.selector.css === ':parent-link') {
+                        return c.closest('a[href]') !== null;
+                      }
+                      return c.querySelector(sel.selector.css);
+                    });
                   });
 
                   console.log('[ScrapingEngine] Containers with ALL our elements: ' + containersWithAllElements.length);
@@ -659,6 +953,11 @@ export class ScrapingEngine {
             var el = null;
             var css = sel.selector.css;
 
+            // Special handling for :parent-link - look UP the DOM
+            if (css === ':parent-link') {
+              return container.closest('a[href]');
+            }
+
             // Strategy 1: Use the selector directly
             el = container.querySelector(css);
 
@@ -709,7 +1008,12 @@ export class ScrapingEngine {
                 }
                 break;
               case 'src':
-                value = el.getAttribute('src');
+                // Try src first, then fall back to data-src for lazy-loaded images
+                value = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || null;
+                // Skip placeholder images
+                if (value && (value.includes('placeholder') || value.includes('loading') || value.includes('blank') || value.startsWith('data:image'))) {
+                  value = el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || null;
+                }
                 if (value && !value.startsWith('http')) {
                   value = new URL(value, window.location.origin).href;
                 }
@@ -960,6 +1264,51 @@ export class ScrapingEngine {
     `);
   }
 
+  // Force all images to have their src populated from data-src before extraction
+  private async forceAllImagesToLoad(): Promise<void> {
+    const result = await this.page.evaluate(`
+      (function() {
+        var imagesFixed = 0;
+
+        // Find all images and ensure they have src populated
+        document.querySelectorAll('img').forEach(function(img) {
+          var currentSrc = img.getAttribute('src') || '';
+          var isPlaceholder = !currentSrc ||
+                              currentSrc.includes('placeholder') ||
+                              currentSrc.includes('loading') ||
+                              currentSrc.includes('blank') ||
+                              currentSrc.startsWith('data:image');
+
+          if (isPlaceholder) {
+            // Try to find the real source from various data attributes
+            var realSrc = img.getAttribute('data-src') ||
+                          img.getAttribute('data-lazy-src') ||
+                          img.getAttribute('data-original') ||
+                          img.getAttribute('data-lazy') ||
+                          img.getAttribute('data-srcset');
+
+            if (realSrc) {
+              // Handle srcset format (take first URL)
+              if (realSrc.includes(',') || realSrc.includes(' ')) {
+                var firstUrl = realSrc.split(',')[0].split(' ')[0].trim();
+                if (firstUrl) realSrc = firstUrl;
+              }
+
+              img.setAttribute('src', realSrc);
+              img.removeAttribute('loading'); // Remove lazy loading attribute
+              imagesFixed++;
+            }
+          }
+        });
+
+        console.log('[ScrapingEngine] Forced ' + imagesFixed + ' lazy-loaded images to load');
+        return imagesFixed;
+      })();
+    `);
+
+    console.log(`[ScrapingEngine] Force-loaded images: ${result.result?.value || 0}`);
+  }
+
   // Force trigger lazy loading by simulating scroll events
   private async triggerLazyLoadEvents(): Promise<void> {
     await this.page.evaluate(() => {
@@ -995,6 +1344,8 @@ export class ScrapingEngine {
       return await this.page.evaluate((sels) => {
         let total = 0;
         sels.forEach((sel: { selector: { css: string } }) => {
+          // Skip :parent-link as it's not a valid CSS selector
+          if (sel.selector.css === ':parent-link') return;
           total += document.querySelectorAll(sel.selector.css).length;
         });
         return total;
@@ -1155,6 +1506,9 @@ export class ScrapingEngine {
     // Final wait for any remaining loading
     await this.waitForLoadingToComplete(loadingWaitTimeout);
 
+    // Force all lazy-loaded images to have their src populated before extraction
+    await this.forceAllImagesToLoad();
+
     // Scroll back to top before extraction
     await this.page.evaluate(() => {
       window.scrollTo({ top: 0, behavior: 'instant' });
@@ -1229,45 +1583,68 @@ export class ScrapingEngine {
   // =========================================================================
 
   private async executePreActions(actions: RecorderAction[]): Promise<void> {
-    for (const action of actions) {
-      console.log(`[ScrapingEngine] Pre-action: ${action.type} on ${action.selector}`);
-
-      try {
-        // Check if element exists first
-        const exists = await this.page
-          .waitForSelector(action.selector, { timeout: 3000, state: 'visible' })
-          .then(() => true)
-          .catch(() => false);
-
-        if (!exists) {
-          console.log(`[ScrapingEngine] Pre-action element not found, skipping: ${action.selector}`);
-          continue; // Skip if not found (popup might not appear)
+    // Block navigation during pre-actions to prevent accidental redirects
+    // (e.g., clicking "Accept Cookies" might trigger a click on element behind it)
+    const currentUrl = this.page.url();
+    await this.page.route('**/*', async (route) => {
+      const request = route.request();
+      if (request.isNavigationRequest()) {
+        const targetUrl = request.url();
+        if (targetUrl === currentUrl || targetUrl.startsWith(currentUrl + '#')) {
+          await route.continue();
+        } else {
+          console.log(`[ScrapingEngine] Blocked navigation during pre-actions: ${targetUrl}`);
+          await route.abort('aborted');
         }
-
-        switch (action.type) {
-          case 'click':
-            await this.page.click(action.selector, { timeout: 3000 });
-            break;
-          case 'type':
-            if (action.value) {
-              await this.page.fill(action.selector, action.value, { timeout: 3000 });
-            }
-            break;
-          case 'select':
-            if (action.value) {
-              await this.page.selectOption(action.selector, action.value, { timeout: 3000 });
-            }
-            break;
-        }
-
-        // Small delay between pre-actions
-        await new Promise((r) => setTimeout(r, 200));
-      } catch (error) {
-        // Pre-actions are optional (e.g., cookie popups may not always appear)
-        // Log and continue instead of failing the entire scrape
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.log(`[ScrapingEngine] Pre-action failed (non-fatal), continuing: ${errorMessage}`);
+      } else {
+        await route.continue();
       }
+    });
+
+    try {
+      for (const action of actions) {
+        console.log(`[ScrapingEngine] Pre-action: ${action.type} on ${action.selector}`);
+
+        try {
+          // Check if element exists first
+          const exists = await this.page
+            .waitForSelector(action.selector, { timeout: 3000, state: 'visible' })
+            .then(() => true)
+            .catch(() => false);
+
+          if (!exists) {
+            console.log(`[ScrapingEngine] Pre-action element not found, skipping: ${action.selector}`);
+            continue; // Skip if not found (popup might not appear)
+          }
+
+          switch (action.type) {
+            case 'click':
+              await this.page.click(action.selector, { timeout: 3000 });
+              break;
+            case 'type':
+              if (action.value) {
+                await this.page.fill(action.selector, action.value, { timeout: 3000 });
+              }
+              break;
+            case 'select':
+              if (action.value) {
+                await this.page.selectOption(action.selector, action.value, { timeout: 3000 });
+              }
+              break;
+          }
+
+          // Small delay between pre-actions
+          await new Promise((r) => setTimeout(r, 200));
+        } catch (error) {
+          // Pre-actions are optional (e.g., cookie popups may not always appear)
+          // Log and continue instead of failing the entire scrape
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.log(`[ScrapingEngine] Pre-action failed (non-fatal), continuing: ${errorMessage}`);
+        }
+      }
+    } finally {
+      // Remove navigation blocking after pre-actions complete
+      await this.page.unroute('**/*');
     }
   }
 
@@ -1296,6 +1673,11 @@ export class ScrapingEngine {
 
     // Validate each selector
     for (const selector of config.selectors) {
+      // Skip :parent-link validation - it will be checked via closest() at extraction time
+      if (selector.selector.css === ':parent-link') {
+        continue;
+      }
+
       const count = await this.page.evaluate(
         (css) => document.querySelectorAll(css).length,
         selector.selector.css
@@ -1371,7 +1753,12 @@ export class ScrapingEngine {
                 result[name] = el.getAttribute('href');
                 break;
               case 'src':
-                result[name] = el.getAttribute('src');
+                // Try src first, then fall back to data-src for lazy-loaded images
+                var imgSrc = el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || null;
+                if (imgSrc && (imgSrc.includes('placeholder') || imgSrc.includes('loading') || imgSrc.includes('blank') || imgSrc.startsWith('data:image'))) {
+                  imgSrc = el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || el.getAttribute('data-original') || null;
+                }
+                result[name] = imgSrc;
                 break;
               default:
                 result[name] = el.textContent?.trim() || null;

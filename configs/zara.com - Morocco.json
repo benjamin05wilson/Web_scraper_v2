@@ -1,0 +1,17 @@
+{
+  "competitor_type": "local",
+  "country": "Morocco",
+  "url": "https://www.zara.com/ma/en/kids-girl-tshirts-l450.html?v1=2426157",
+  "selectors": {
+    "Title": [
+      "a.product-link.link > h3"
+    ],
+    "Price": [
+      "div.money-amount.money-amount--highlight > span"
+    ],
+    "Image": [
+      "div.media.products-category-grid-media > div > img"
+    ]
+  },
+  "itemContainer": "li.product-grid-product[data-productid], li.product-grid-block-dynamic__product-info"
+}

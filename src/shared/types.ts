@@ -17,6 +17,9 @@ export type WSMessageType =
   | 'dom:highlight'
   | 'dom:select'
   | 'dom:selected'
+  | 'dom:autoDetect'
+  | 'dom:autoDetectResult'
+  | 'dom:lowConfidence'
   | 'selector:test'
   | 'selector:result'
   | 'selector:findPattern'
@@ -100,7 +103,8 @@ export interface ElementSelector {
   css: string;
   cssGeneric?: string; // Generic selector that matches multiple similar elements
   cssGenericCount?: number; // How many elements the generic selector matches
-  xpath: string;
+  cssSpecific?: string; // Specific selector for this exact element (from ML detection)
+  xpath?: string;
   text?: string;
   attributes: Record<string, string>;
   tagName: string;
@@ -110,6 +114,10 @@ export interface ElementSelector {
     width: number;
     height: number;
   };
+  // ML detection confidence (0-1)
+  confidence?: number;
+  // Whether manual verification is recommended
+  fallbackRecommended?: boolean;
 }
 
 export interface DOMHighlight {
@@ -185,6 +193,7 @@ export interface ScraperConfig {
   };
   itemContainer?: string; // Selector for repeating item containers
   autoScroll?: boolean; // Auto-scroll to load lazy content before scraping (default: true)
+  targetProducts?: number; // Max products to scrape - stops when target reached (0 = unlimited)
 }
 
 // Scraper Results
@@ -317,4 +326,204 @@ export interface UrlHoverPayload {
   text?: string;
   x: number;
   y: number;
+}
+
+// ============================================================================
+// CONFIG TYPES - For /configs API (BigQuery storage)
+// ============================================================================
+
+export interface Config {
+  name: string;
+  url?: string;
+  selectors: {
+    Title?: string | string[];
+    Price?: string | string[];
+    URL?: string | string[];
+    Image?: string | string[];
+    OriginalPrice?: string | string[];
+  };
+  pagination?: {
+    type: 'infinite_scroll' | 'url_pattern' | 'next_page';
+    pattern?: string;
+    selector?: string;
+    start_page?: number;
+    max_pages?: number;
+  };
+  alignment?: {
+    matched: boolean;
+    method: string;
+    count: number;
+  };
+  country?: string;
+  competitor_type?: 'local' | 'global';
+  created_at?: string;
+  updated_at?: string;
+}
+
+// ============================================================================
+// SCHEDULE TYPES - For /schedules API
+// ============================================================================
+
+export interface Schedule {
+  id: number;
+  name: string;
+  type: 'scraper' | 'batch';
+  config?: string;
+  csv_path?: string;
+  schedule: string; // Cron expression
+  enabled: boolean;
+  last_run?: string;
+  next_run?: string;
+  created_at: string;
+}
+
+export interface CreateScheduleData {
+  name: string;
+  type: 'scraper' | 'batch';
+  config?: string;
+  csv_path?: string;
+  schedule: string;
+  enabled?: boolean;
+}
+
+// ============================================================================
+// BATCH TYPES - For batch processing
+// ============================================================================
+
+export type BatchJobStatus = 'pending' | 'running' | 'completed' | 'error' | 'paused' | 'skipped';
+
+export interface BatchJob {
+  index: number;
+  country: string;
+  division: string;
+  category: string;
+  nextUrl: string;
+  sourceUrl: string;
+  domain: string;
+  status: BatchJobStatus;
+  progress: number;
+  itemCount: number;
+  error?: string;
+  startedAt?: number;
+  completedAt?: number;
+  results?: unknown[]; // Scraped items
+  retryCount?: number; // Number of retry attempts (max 1)
+}
+
+export interface BatchCSVRow {
+  Country: string;
+  Division: string;
+  Category: string;
+  'Next URL': string;
+  'Source URL': string;
+}
+
+export type BrowserSlotStatus = 'idle' | 'loading' | 'scraping' | 'captcha' | 'error' | 'cloudflare';
+
+export interface BrowserSlot {
+  id: number;
+  status: BrowserSlotStatus;
+  sessionId?: string; // Server session ID for this slot
+  currentUrl?: string;
+  currentJob?: BatchJob;
+  frameData?: string; // Base64 JPEG frame
+  lastUpdate?: number;
+}
+
+export interface BatchProgress {
+  total: number;
+  completed: number;
+  errors: number;
+  skipped: number;
+  pending: number;
+  running: number;
+  itemsScraped: number;
+}
+
+// Next URL scraping types
+export interface NextUrlEntry {
+  key: string;
+  url: string;
+  division: string;
+  category: string;
+  country: string;
+}
+
+export type NextScrapeStatus = 'pending' | 'running' | 'completed' | 'error';
+
+// ============================================================================
+// PRODUCT TYPES - For /api/products API
+// ============================================================================
+
+export interface Product {
+  item_name: string;
+  brand?: string;
+  price?: number;
+  price_raw?: string;
+  original_price?: number;
+  currency?: string;
+  domain?: string;
+  category?: string;
+  country?: string;
+  competitor_type?: string;
+  product_url?: string;
+  image_url?: string;
+  source_url?: string;
+  scraped_at: string;
+}
+
+export interface ProductStats {
+  total_products: number;
+  country_count: number;
+  domain_count: number;
+  category_count: number;
+  avg_price?: number;
+  countries: string[];
+  domains: string[];
+  categories: string[];
+}
+
+export type DateRangeFilter = 'today' | 'week' | 'month' | 'all';
+
+export interface ProductFilters {
+  country?: string;
+  domain?: string;
+  category?: string;
+  dateRange: DateRangeFilter;
+  search?: string;
+}
+
+export interface ProductsResponse {
+  products: Product[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
+// ============================================================================
+// ACTIVITY TYPES - For activity timeline
+// ============================================================================
+
+export type ActivityType = 'scrape' | 'create' | 'update' | 'delete' | 'export' | 'import' | 'schedule';
+
+export interface Activity {
+  id: string;
+  type: ActivityType;
+  description: string;
+  details?: Record<string, unknown>;
+  timestamp: number;
+}
+
+// ============================================================================
+// DOMAIN SUMMARY TYPES - For reports page
+// ============================================================================
+
+export interface DomainSummary {
+  domain: string;
+  productCount: number;
+  avgPrice: number;
+  minPrice: number;
+  maxPrice: number;
+  countries: string[];
 }

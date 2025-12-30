@@ -342,7 +342,7 @@ export const BrowserView: React.FC<BrowserViewProps> = ({
         onWheel={handleWheel}
       />
 
-      {/* Element highlight overlay */}
+      {/* Element highlight overlay - only for hover (selected elements are highlighted in-browser) */}
       <div className="overlay-container">
         {selectionMode && hoveredElement && overlayStyle && (
           <div className="element-highlight" style={overlayStyle}>

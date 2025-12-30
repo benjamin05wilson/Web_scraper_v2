@@ -217,4 +217,151 @@ export interface UrlHoverPayload {
     x: number;
     y: number;
 }
+export interface Config {
+    name: string;
+    url?: string;
+    selectors: {
+        Title?: string | string[];
+        Price?: string | string[];
+        URL?: string | string[];
+        Image?: string | string[];
+        OriginalPrice?: string | string[];
+    };
+    pagination?: {
+        type: 'infinite_scroll' | 'url_pattern' | 'next_page';
+        pattern?: string;
+        selector?: string;
+        start_page?: number;
+        max_pages?: number;
+    };
+    alignment?: {
+        matched: boolean;
+        method: string;
+        count: number;
+    };
+    country?: string;
+    competitor_type?: 'local' | 'global';
+    created_at?: string;
+    updated_at?: string;
+}
+export interface Schedule {
+    id: number;
+    name: string;
+    type: 'scraper' | 'batch';
+    config?: string;
+    csv_path?: string;
+    schedule: string;
+    enabled: boolean;
+    last_run?: string;
+    next_run?: string;
+    created_at: string;
+}
+export interface CreateScheduleData {
+    name: string;
+    type: 'scraper' | 'batch';
+    config?: string;
+    csv_path?: string;
+    schedule: string;
+    enabled?: boolean;
+}
+export type BatchJobStatus = 'pending' | 'running' | 'completed' | 'error' | 'paused' | 'skipped';
+export interface BatchJob {
+    index: number;
+    country: string;
+    division: string;
+    category: string;
+    nextUrl: string;
+    sourceUrl: string;
+    domain: string;
+    status: BatchJobStatus;
+    progress: number;
+    itemCount: number;
+    error?: string;
+    startedAt?: number;
+    completedAt?: number;
+    results?: unknown[];
+}
+export interface BatchCSVRow {
+    Country: string;
+    Division: string;
+    Category: string;
+    'Next URL': string;
+    'Source URL': string;
+}
+export type BrowserSlotStatus = 'idle' | 'loading' | 'scraping' | 'captcha' | 'error' | 'cloudflare';
+export interface BrowserSlot {
+    id: number;
+    status: BrowserSlotStatus;
+    sessionId?: string;
+    currentUrl?: string;
+    currentJob?: BatchJob;
+    frameData?: string;
+    lastUpdate?: number;
+}
+export interface BatchProgress {
+    total: number;
+    completed: number;
+    errors: number;
+    skipped: number;
+    pending: number;
+    running: number;
+    itemsScraped: number;
+}
+export interface Product {
+    item_name: string;
+    brand?: string;
+    price?: number;
+    price_raw?: string;
+    original_price?: number;
+    currency?: string;
+    domain?: string;
+    category?: string;
+    country?: string;
+    competitor_type?: string;
+    product_url?: string;
+    image_url?: string;
+    source_url?: string;
+    scraped_at: string;
+}
+export interface ProductStats {
+    total_products: number;
+    country_count: number;
+    domain_count: number;
+    category_count: number;
+    avg_price?: number;
+    countries: string[];
+    domains: string[];
+    categories: string[];
+}
+export type DateRangeFilter = 'today' | 'week' | 'month' | 'all';
+export interface ProductFilters {
+    country?: string;
+    domain?: string;
+    category?: string;
+    dateRange: DateRangeFilter;
+    search?: string;
+}
+export interface ProductsResponse {
+    products: Product[];
+    total: number;
+    page: number;
+    pageSize: number;
+    hasMore: boolean;
+}
+export type ActivityType = 'scrape' | 'create' | 'update' | 'delete' | 'export' | 'import' | 'schedule';
+export interface Activity {
+    id: string;
+    type: ActivityType;
+    description: string;
+    details?: Record<string, unknown>;
+    timestamp: number;
+}
+export interface DomainSummary {
+    domain: string;
+    productCount: number;
+    avgPrice: number;
+    minPrice: number;
+    maxPrice: number;
+    countries: string[];
+}
 //# sourceMappingURL=types.d.ts.map

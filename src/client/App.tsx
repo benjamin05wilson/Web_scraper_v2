@@ -3,15 +3,20 @@
 // ============================================================================
 
 import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
-import { ScraperProvider } from './context/ScraperContext';
 import { ToastProvider } from './context/ToastContext';
+import { ConfigsProvider } from './context/ConfigsContext';
+import { SchedulerProvider } from './context/SchedulerContext';
+import { ReportsProvider } from './context/ReportsContext';
+import { BatchProvider } from './context/BatchContext';
 import { MainLayout } from './layouts/MainLayout';
-import { Dashboard } from './pages/Dashboard';
-import { ScraperBuilder } from './pages/ScraperBuilder';
-import { ResultsViewer, ResultDetail } from './pages/ResultsViewer';
-import { Settings } from './pages/Settings';
+import { BuilderPage } from './components/builder';
+import { ScraperPage } from './components/scraper';
+import { BatchPage } from './components/batch';
+import { ConfigsPage } from './components/configs';
+import { ReportsPage } from './components/reports';
+import { SchedulerPage } from './components/scheduler';
 import { ToastContainer } from './components/common';
 
 export const App: React.FC = () => {
@@ -19,19 +24,26 @@ export const App: React.FC = () => {
     <BrowserRouter>
       <ThemeProvider>
         <ToastProvider>
-          <ScraperProvider>
-            <Routes>
-              <Route element={<MainLayout />}>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/scraper" element={<ScraperBuilder />} />
-                <Route path="/scraper/:id" element={<ScraperBuilder />} />
-                <Route path="/results" element={<ResultsViewer />} />
-                <Route path="/results/:id" element={<ResultDetail />} />
-                <Route path="/settings" element={<Settings />} />
-              </Route>
-            </Routes>
-            <ToastContainer />
-          </ScraperProvider>
+          <ConfigsProvider>
+            <SchedulerProvider>
+              <ReportsProvider>
+                <BatchProvider>
+                  <Routes>
+                    <Route element={<MainLayout />}>
+                      <Route path="/" element={<Navigate to="/builder" replace />} />
+                      <Route path="/builder" element={<BuilderPage />} />
+                      <Route path="/scraper" element={<ScraperPage />} />
+                      <Route path="/batch" element={<BatchPage />} />
+                      <Route path="/configs" element={<ConfigsPage />} />
+                      <Route path="/reports" element={<ReportsPage />} />
+                      <Route path="/scheduler" element={<SchedulerPage />} />
+                    </Route>
+                  </Routes>
+                  <ToastContainer />
+                </BatchProvider>
+              </ReportsProvider>
+            </SchedulerProvider>
+          </ConfigsProvider>
         </ToastProvider>
       </ThemeProvider>
     </BrowserRouter>

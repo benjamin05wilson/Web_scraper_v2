@@ -153,16 +153,28 @@ export class BrowserManager extends EventEmitter {
 
     console.log(`[BrowserManager] Destroying session ${sessionId}`);
 
+    // Remove from map first to prevent double cleanup
+    this.sessions.delete(sessionId);
+
     try {
-      await session.cdp.detach();
-      await session.page.close();
-      await session.context.close();
-      await session.browser.close();
+      // Try to detach CDP, but ignore errors if already detached
+      try {
+        await session.cdp.detach();
+      } catch {
+        // CDP session may already be detached
+      }
+
+      // Close page if still open
+      if (!session.page.isClosed()) {
+        await session.page.close();
+      }
+
+      // Close context and browser
+      await session.context.close().catch(() => {});
+      await session.browser.close().catch(() => {});
     } catch (error) {
       console.error(`[BrowserManager] Error destroying session:`, error);
     }
-
-    this.sessions.delete(sessionId);
   }
 
   // =========================================================================
@@ -225,6 +237,9 @@ export class BrowserManager extends EventEmitter {
           clickCount: 1,
           modifiers,
         });
+        // Small delay to allow DOM to process the mousedown before mouseup
+        // This prevents click-through when elements close on mousedown
+        await new Promise(resolve => setTimeout(resolve, 50));
         await cdp.send('Input.dispatchMouseEvent', {
           type: 'mouseReleased',
           x,

@@ -61,15 +61,21 @@ interface SidebarProps {
   // Container extraction (from server)
   extractContainerContent?: (selector: string) => void;
   extractedContent?: ExtractedContentItem[];
+
+  // Auto-detect product
+  autoDetectProduct?: () => void;
+  isAutoDetecting?: boolean;
+  sessionId?: string | null;
 }
 
-const SELECTOR_ROLES: { role: SelectorRole; label: string; extractionType: string }[] = [
-  { role: 'title', label: 'Title', extractionType: 'text' },
-  { role: 'originalPrice', label: 'Original Price', extractionType: 'text' },
-  { role: 'salePrice', label: 'Sale Price', extractionType: 'text' },
-  { role: 'url', label: 'URL', extractionType: 'href' },
-  { role: 'image', label: 'Image', extractionType: 'src' },
-  { role: 'nextPage', label: 'Next Page', extractionType: 'text' },
+// Simple, friendly labels for each data type we can grab
+const SELECTOR_ROLES: { role: SelectorRole; label: string; emoji: string; extractionType: string }[] = [
+  { role: 'title', label: 'Name', emoji: '📝', extractionType: 'text' },
+  { role: 'originalPrice', label: 'Old Price', emoji: '💰', extractionType: 'text' },
+  { role: 'salePrice', label: 'Sale Price', emoji: '🏷️', extractionType: 'text' },
+  { role: 'url', label: 'Link', emoji: '🔗', extractionType: 'href' },
+  { role: 'image', label: 'Picture', emoji: '🖼️', extractionType: 'src' },
+  { role: 'nextPage', label: 'Next Page', emoji: '➡️', extractionType: 'text' },
 ];
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -105,6 +111,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onContainerSelectorChange,
   extractContainerContent,
   extractedContent,
+  autoDetectProduct,
+  isAutoDetecting,
+  sessionId,
 }) => {
   const [expandedPanels, setExpandedPanels] = useState({
     selectors: true,
@@ -149,8 +158,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     if (!selectedElement) return;
     setContainerElement(selectedElement);
 
-    // Use the cssGeneric or css as the container selector
-    const containerCss = selectedElement.cssGeneric || selectedElement.css;
+    // Use combinedCss (for Zara split layout), cssGeneric, or css as the container selector
+    // combinedCss contains both selectors comma-separated for sites like Zara
+    const containerCss = (selectedElement as any).combinedCss || selectedElement.cssGeneric || selectedElement.css;
     setItemContainerSelector(containerCss);
 
     // Request content extraction from server
@@ -317,59 +327,85 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <div className="sidebar">
-      {/* Header */}
-      <div style={{ padding: '16px', borderBottom: '1px solid var(--border-color)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>Scraper Builder</h1>
+      {/* Header - Super Simple */}
+      <div style={{ padding: '20px', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-secondary)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>🤖 Data Grabber</h1>
           {lastSavedAt !== null && lastSavedAt !== undefined ? (
             <span className={`save-indicator ${hasUnsavedChanges ? 'unsaved' : 'saved'}`}>
-              {hasUnsavedChanges ? 'Unsaved' : `Saved ${getRelativeTime(lastSavedAt)}`}
+              {hasUnsavedChanges ? '⚠️ Not Saved' : `✅ Saved`}
             </span>
           ) : null}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
-            className={`btn ${selectionMode ? 'active' : ''}`}
+            className={`btn ${selectionMode ? 'btn-success' : 'btn-primary'}`}
             onClick={toggleSelectionMode}
-            style={{ flex: 1 }}
+            style={{
+              flex: 1,
+              padding: '14px 16px',
+              fontSize: 16,
+              fontWeight: 600,
+              borderRadius: 8
+            }}
           >
-            {selectionMode ? '\u2713 Select Mode' : 'Select Mode'}
+            {selectionMode ? '✅ Picking Mode ON' : '👆 Start Picking'}
           </button>
         </div>
+        {!selectionMode && (
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 10, marginBottom: 0, textAlign: 'center' }}>
+            Click the button above to start!
+          </p>
+        )}
       </div>
 
       {/* Scrollable content */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
-        {/* Pre-Actions Recorder Panel - At Top */}
+        {/* Pre-Actions Recorder Panel - Simplified */}
         <div className={`panel ${expandedPanels.recorder ? '' : 'panel-collapsed'}`}>
           <div className="panel-header" onClick={() => togglePanel('recorder')}>
             <span className="panel-title">
-              Pre-Actions {recordedActions.length > 0 && `(${recordedActions.length})`}
+              🎬 Record Clicks {recordedActions.length > 0 && `(${recordedActions.length})`}
             </span>
             <span>{expandedPanels.recorder ? '−' : '+'}</span>
           </div>
           <div className="panel-content">
-            <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-              Record actions for dismissing popups, accepting cookies, etc.
-            </p>
+            <div style={{
+              padding: 12,
+              background: 'rgba(255, 193, 7, 0.1)',
+              borderRadius: 8,
+              border: '1px solid var(--accent-warning)',
+              marginBottom: 12
+            }}>
+              <p style={{ fontSize: 13, color: 'var(--text-primary)', margin: 0 }}>
+                <strong>What's this?</strong> If you need to click "Accept Cookies" or close a popup before grabbing data, record those clicks here first!
+              </p>
+            </div>
             <div style={{ marginBottom: 12 }}>
               {isRecording ? (
-                <button className="btn btn-danger" onClick={stopRecording} style={{ width: '100%' }}>
-                  ⏹ Stop Recording
+                <button
+                  className="btn btn-danger"
+                  onClick={stopRecording}
+                  style={{ width: '100%', padding: '12px 16px', fontSize: 15, fontWeight: 600, borderRadius: 8 }}
+                >
+                  ⏹️ Stop Recording
                 </button>
               ) : (
                 <button
                   className="btn btn-warning"
                   onClick={() => startRecording('Pre-actions')}
-                  style={{ width: '100%' }}
+                  style={{ width: '100%', padding: '12px 16px', fontSize: 15, fontWeight: 600, borderRadius: 8 }}
                 >
-                  ⏺ Start Recording
+                  🔴 Record My Clicks
                 </button>
               )}
             </div>
 
             {recordedActions.length > 0 && (
               <div className="action-list">
+                <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                  ✅ {recordedActions.length} click{recordedActions.length > 1 ? 's' : ''} recorded:
+                </p>
                 {recordedActions.map((action, idx) => (
                   <div key={action.id} className="action-item">
                     <span style={{ color: 'var(--text-muted)', width: 20 }}>{idx + 1}.</span>
@@ -382,93 +418,131 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        {/* Element Selection Wizard */}
+        {/* Element Selection Wizard - Super Simple */}
         {selectionMode && (
-          <div className="panel">
-            <div className="panel-header">
-              <span className="panel-title">
-                {wizardStep === 'container' && 'Step 1: Select Product Card'}
-                {wizardStep === 'labeling' && 'Step 2: Label Fields'}
-                {wizardStep === 'complete' && 'Selection Complete'}
+          <div className="panel" style={{ border: '2px solid var(--accent-primary)' }}>
+            <div className="panel-header" style={{ background: 'var(--accent-primary)', color: 'white' }}>
+              <span className="panel-title" style={{ color: 'white', fontSize: 16 }}>
+                {wizardStep === 'container' && '👆 Step 1: Pick a Product'}
+                {wizardStep === 'labeling' && '🏷️ Step 2: Label the Info'}
+                {wizardStep === 'complete' && '🎉 All Done!'}
               </span>
               {(containerElement || labeledItems.size > 0) && wizardStep !== 'complete' && (
                 <button
                   className="btn btn-danger"
                   onClick={resetWizard}
-                  style={{ padding: '2px 8px', fontSize: 10 }}
+                  style={{ padding: '4px 10px', fontSize: 11, borderRadius: 6 }}
                 >
-                  Reset
+                  Start Over
                 </button>
               )}
             </div>
             <div className="panel-content">
-              {/* Step indicator */}
+              {/* Step indicator - bigger and clearer */}
               <div style={{
                 display: 'flex',
-                gap: 4,
-                marginBottom: 12
+                gap: 8,
+                marginBottom: 16,
+                alignItems: 'center',
+                justifyContent: 'center'
               }}>
                 <div style={{
-                  flex: 1,
+                  width: 36,
+                  height: 36,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 18,
+                  fontWeight: 700,
+                  background: wizardStep === 'container' ? 'var(--accent-primary)' : 'var(--accent-success)',
+                  color: 'white'
+                }}>
+                  {wizardStep === 'container' ? '1' : '✓'}
+                </div>
+                <div style={{
+                  width: 40,
                   height: 4,
                   borderRadius: 2,
-                  background: wizardStep === 'container' ? 'var(--accent-primary)' : 'var(--accent-success)'
+                  background: wizardStep === 'labeling' || wizardStep === 'complete' ? 'var(--accent-success)' : 'var(--bg-tertiary)'
                 }} />
                 <div style={{
-                  flex: 1,
-                  height: 4,
-                  borderRadius: 2,
-                  background: wizardStep === 'labeling' ? 'var(--accent-primary)' : wizardStep === 'complete' ? 'var(--accent-success)' : 'var(--bg-tertiary)'
-                }} />
+                  width: 36,
+                  height: 36,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 18,
+                  fontWeight: 700,
+                  background: wizardStep === 'labeling' ? 'var(--accent-primary)' : wizardStep === 'complete' ? 'var(--accent-success)' : 'var(--bg-tertiary)',
+                  color: wizardStep === 'container' ? 'var(--text-muted)' : 'white'
+                }}>
+                  {wizardStep === 'complete' ? '✓' : '2'}
+                </div>
               </div>
 
-              {/* Instructions based on step */}
+              {/* Instructions based on step - BIG and CLEAR */}
               {wizardStep === 'container' && (
                 <div style={{
-                  padding: 8,
-                  background: 'rgba(138, 43, 226, 0.1)',
-                  borderRadius: 4,
-                  border: '1px solid #8a2be2',
-                  marginBottom: 12
+                  padding: 16,
+                  background: 'linear-gradient(135deg, rgba(138, 43, 226, 0.15), rgba(0, 153, 255, 0.15))',
+                  borderRadius: 12,
+                  border: '2px dashed #8a2be2',
+                  marginBottom: 16,
+                  textAlign: 'center'
                 }}>
-                  <p style={{ fontSize: 11, color: 'var(--text-primary)', margin: 0 }}>
-                    <strong>Step 1:</strong> Click on the <strong>entire product card</strong>.
-                    This is the box containing one product's info (title, price, image, etc.)
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>👆</div>
+                  <p style={{ fontSize: 15, color: 'var(--text-primary)', margin: 0, fontWeight: 600 }}>
+                    Click on ONE product in the browser
+                  </p>
+                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '8px 0 0 0' }}>
+                    Pick any product box - the thing with a name, price, and picture
                   </p>
                 </div>
               )}
 
               {wizardStep === 'labeling' && (
                 <div style={{
-                  padding: 8,
-                  background: 'rgba(0, 153, 255, 0.1)',
-                  borderRadius: 4,
-                  border: '1px solid var(--accent-primary)',
-                  marginBottom: 12
+                  padding: 16,
+                  background: 'linear-gradient(135deg, rgba(0, 153, 255, 0.15), rgba(0, 204, 102, 0.15))',
+                  borderRadius: 12,
+                  border: '2px solid var(--accent-primary)',
+                  marginBottom: 16,
+                  textAlign: 'center'
                 }}>
-                  <p style={{ fontSize: 11, color: 'var(--text-primary)', margin: 0 }}>
-                    <strong>Step 2:</strong> Label each field below. Click on a field to identify what it is (title, price, etc.)
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>🏷️</div>
+                  <p style={{ fontSize: 15, color: 'var(--text-primary)', margin: 0, fontWeight: 600 }}>
+                    Tell us what each thing is!
+                  </p>
+                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '8px 0 0 0' }}>
+                    Look at each piece of info below and click the right label
                   </p>
                 </div>
               )}
 
               {wizardStep === 'complete' && (
                 <div style={{
-                  padding: 8,
-                  background: 'rgba(0, 204, 102, 0.1)',
-                  borderRadius: 4,
-                  border: '1px solid var(--accent-success)',
-                  marginBottom: 12
+                  padding: 20,
+                  background: 'linear-gradient(135deg, rgba(0, 204, 102, 0.2), rgba(0, 153, 255, 0.1))',
+                  borderRadius: 12,
+                  border: '2px solid var(--accent-success)',
+                  marginBottom: 16,
+                  textAlign: 'center'
                 }}>
-                  <p style={{ fontSize: 11, color: 'var(--text-primary)', margin: 0 }}>
-                    <strong>Done!</strong> Selectors have been assigned. You can now run the scraper.
+                  <div style={{ fontSize: 48, marginBottom: 8 }}>🎉</div>
+                  <p style={{ fontSize: 18, color: 'var(--accent-success)', margin: 0, fontWeight: 700 }}>
+                    Great job!
+                  </p>
+                  <p style={{ fontSize: 14, color: 'var(--text-secondary)', margin: '8px 0 16px 0' }}>
+                    Now scroll down and click the big green button to grab all the data!
                   </p>
                   <button
                     className="btn"
                     onClick={resetWizard}
-                    style={{ marginTop: 8, width: '100%' }}
+                    style={{ width: '100%', padding: '10px 16px', fontSize: 14, borderRadius: 8 }}
                   >
-                    Start New Selection
+                    🔄 Pick Different Products
                   </button>
                 </div>
               )}
@@ -476,26 +550,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {/* Container step - show selected element and confirm button */}
               {wizardStep === 'container' && selectedElement && (
                 <div style={{
-                  padding: 8,
-                  background: 'var(--bg-tertiary)',
-                  borderRadius: 4,
-                  marginBottom: 12
+                  padding: 16,
+                  background: 'rgba(0, 204, 102, 0.1)',
+                  borderRadius: 12,
+                  border: '2px solid var(--accent-success)',
+                  textAlign: 'center'
                 }}>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                    Selected container:
-                  </div>
-                  <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>
-                    &lt;{selectedElement.tagName.toLowerCase()}&gt;
-                  </div>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 8, fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                    {selectedElement.cssGeneric || selectedElement.css}
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>✅</div>
+                  <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--accent-success)', marginBottom: 12 }}>
+                    You picked something!
                   </div>
                   <button
                     className="btn btn-success"
                     onClick={setContainer}
-                    style={{ width: '100%' }}
+                    style={{
+                      width: '100%',
+                      padding: '14px 16px',
+                      fontSize: 16,
+                      fontWeight: 600,
+                      borderRadius: 8
+                    }}
                   >
-                    Extract Fields From This Card
+                    ✨ Yes! Use This One
                   </button>
                 </div>
               )}
@@ -503,111 +579,124 @@ export const Sidebar: React.FC<SidebarProps> = ({
               {/* Container step - no selection yet */}
               {wizardStep === 'container' && !selectedElement && (
                 <div style={{
-                  padding: 12,
+                  padding: 20,
                   background: 'var(--bg-tertiary)',
-                  borderRadius: 4,
-                  textAlign: 'center',
-                  fontSize: 12,
-                  color: 'var(--text-secondary)'
+                  borderRadius: 12,
+                  textAlign: 'center'
                 }}>
-                  Click on a product card in the browser
+                  <div style={{ fontSize: 40, marginBottom: 8, opacity: 0.5 }}>⏳</div>
+                  <p style={{ fontSize: 14, color: 'var(--text-secondary)', margin: 0, marginBottom: 16 }}>
+                    Waiting for you to click on a product...
+                  </p>
+                  {sessionId && autoDetectProduct && (
+                    <button
+                      className="btn btn-primary"
+                      onClick={autoDetectProduct}
+                      disabled={isAutoDetecting}
+                      style={{
+                        padding: '12px 20px',
+                        fontSize: 14,
+                        fontWeight: 600,
+                        borderRadius: 8
+                      }}
+                    >
+                      {isAutoDetecting ? (
+                        <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                          <div className="loading-spinner" style={{ width: 16, height: 16 }} />
+                          Finding...
+                        </span>
+                      ) : (
+                        '🔍 Auto-Find a Product'
+                      )}
+                    </button>
+                  )}
                 </div>
               )}
 
-              {/* Labeling step - show extracted content */}
+              {/* Labeling step - show extracted content - SIMPLIFIED */}
               {wizardStep === 'labeling' && (
                 <>
-                  {/* Container info */}
-                  <div style={{
-                    padding: '6px 8px',
-                    background: 'rgba(138, 43, 226, 0.1)',
-                    borderRadius: 4,
-                    marginBottom: 12,
-                    fontSize: 10,
-                    border: '1px solid #8a2be2'
-                  }}>
-                    <span style={{ color: '#8a2be2', fontWeight: 600 }}>Container:</span>{' '}
-                    <span style={{ fontFamily: 'monospace' }}>{itemContainerSelector}</span>
-                  </div>
-
-                  {/* Extracted items list */}
+                  {/* Extracted items list - Made Simple */}
                   {extractedItems.length > 0 ? (
-                    <div style={{ marginBottom: 12 }}>
-                      <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>
-                        Click labels to assign fields. Assign the same label multiple times for fallbacks (first = primary, others = fallback if null):
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{
+                        fontSize: 13,
+                        color: 'var(--text-secondary)',
+                        marginBottom: 12,
+                        textAlign: 'center',
+                        padding: '8px 12px',
+                        background: 'var(--bg-tertiary)',
+                        borderRadius: 8
+                      }}>
+                        👇 We found {extractedItems.length} pieces of info. What is each one?
                       </div>
                       {extractedItems.map((item, idx) => {
                         const assigned = labeledItems.get(item.value);
                         const assignedRole = assigned?.role;
-                        const assignedPriority = assigned?.priority ?? -1;
+                        const assignedRoleInfo = SELECTOR_ROLES.find(r => r.role === assignedRole);
                         return (
                           <div key={idx} style={{
-                            padding: 8,
-                            background: assignedRole ? 'rgba(0, 204, 102, 0.1)' : 'var(--bg-tertiary)',
-                            borderRadius: 4,
-                            marginBottom: 8,
-                            border: assignedRole ? '1px solid var(--accent-success)' : '1px solid var(--border-color)'
+                            padding: 12,
+                            background: assignedRole ? 'rgba(0, 204, 102, 0.15)' : 'var(--bg-tertiary)',
+                            borderRadius: 10,
+                            marginBottom: 10,
+                            border: assignedRole ? '2px solid var(--accent-success)' : '2px solid var(--border-color)'
                           }}>
-                            {/* Item type indicator */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                              <span style={{
-                                padding: '2px 6px',
-                                borderRadius: 3,
-                                fontSize: 9,
-                                fontWeight: 600,
-                                background: item.type === 'text' ? 'var(--accent-primary)' :
-                                           item.type === 'link' ? 'var(--accent-warning)' : 'var(--accent-success)',
-                                color: 'white'
-                              }}>
-                                {item.type.toUpperCase()}
+                            {/* What type of thing is this - simplified */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                              <span style={{ fontSize: 18 }}>
+                                {item.type === 'text' ? '📝' : item.type === 'link' ? '🔗' : '🖼️'}
+                              </span>
+                              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                                {item.type === 'text' ? 'Text' : item.type === 'link' ? 'Link' : 'Picture'}
                               </span>
                               {assignedRole && (
                                 <span style={{
-                                  padding: '2px 6px',
-                                  borderRadius: 3,
-                                  fontSize: 9,
+                                  marginLeft: 'auto',
+                                  padding: '4px 10px',
+                                  borderRadius: 20,
+                                  fontSize: 12,
                                   fontWeight: 600,
                                   background: 'var(--accent-success)',
                                   color: 'white'
                                 }}>
-                                  = {assignedRole.toUpperCase()}{assignedPriority > 0 ? ` (fallback ${assignedPriority})` : ''}
+                                  {assignedRoleInfo?.emoji} {assignedRoleInfo?.label}
                                 </span>
                               )}
                             </div>
 
-                            {/* Item value */}
+                            {/* Item value - what it actually says */}
                             <div style={{
-                              fontSize: 12,
-                              marginBottom: 8,
-                              padding: 6,
+                              fontSize: 14,
+                              marginBottom: 10,
+                              padding: 10,
                               background: 'var(--bg-secondary)',
-                              borderRadius: 3,
-                              fontFamily: item.type !== 'text' ? 'monospace' : 'inherit',
+                              borderRadius: 8,
                               wordBreak: 'break-all',
-                              maxHeight: 60,
-                              overflow: 'auto'
+                              maxHeight: 70,
+                              overflow: 'auto',
+                              border: '1px solid var(--border-color)'
                             }}>
-                              {item.displayText}
+                              {item.displayText || '(empty)'}
                             </div>
 
-                            {/* Label buttons */}
-                            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                              {SELECTOR_ROLES.filter(r => r.role !== 'nextPage').map(({ role, label }) => {
+                            {/* Label buttons - BIGGER */}
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {SELECTOR_ROLES.filter(r => r.role !== 'nextPage').map(({ role, label, emoji }) => {
                                 const isThisRole = assignedRole === role;
-                                // Count how many items have this role (for showing fallback count)
-                                const roleCount = getRoleCount(role);
                                 return (
                                   <button
                                     key={role}
-                                    className={`btn ${isThisRole ? 'btn-success' : 'btn-primary'}`}
+                                    className={`btn ${isThisRole ? 'btn-success' : ''}`}
                                     onClick={() => labelItem(item.value, isThisRole ? null : role)}
                                     style={{
-                                      padding: '3px 8px',
-                                      fontSize: 10,
+                                      padding: '8px 12px',
+                                      fontSize: 13,
+                                      borderRadius: 8,
+                                      fontWeight: isThisRole ? 600 : 400
                                     }}
-                                    title={isThisRole ? 'Click to remove' : roleCount > 0 ? `Add as ${label} fallback #${roleCount + 1}` : `Mark as ${label}`}
                                   >
-                                    {isThisRole ? '✓ ' : ''}{label}{!isThisRole && roleCount > 0 ? ` +${roleCount}` : ''}
+                                    {emoji} {label}
                                   </button>
                                 );
                               })}
@@ -618,38 +707,54 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                   ) : (
                     <div style={{
-                      padding: 12,
+                      padding: 20,
                       background: 'var(--bg-tertiary)',
-                      borderRadius: 4,
-                      textAlign: 'center',
-                      fontSize: 12,
-                      color: 'var(--text-secondary)'
+                      borderRadius: 12,
+                      textAlign: 'center'
                     }}>
-                      No content extracted from container. Try selecting a different card.
+                      <div style={{ fontSize: 32, marginBottom: 8 }}>🤔</div>
+                      <p style={{ fontSize: 14, color: 'var(--text-secondary)', margin: 0 }}>
+                        Hmm, we couldn't find any info in that. Try clicking on a different product!
+                      </p>
+                      <button
+                        className="btn"
+                        onClick={resetWizard}
+                        style={{ marginTop: 12, padding: '10px 16px', fontSize: 14, borderRadius: 8 }}
+                      >
+                        🔄 Try Again
+                      </button>
                     </div>
                   )}
 
-                  {/* Complete button */}
+                  {/* Complete button - BIG AND CLEAR */}
                   {labeledItems.size > 0 && (
                     <button
                       className="btn btn-success"
                       onClick={completeWizard}
-                      style={{ width: '100%' }}
+                      style={{
+                        width: '100%',
+                        padding: '16px 20px',
+                        fontSize: 17,
+                        fontWeight: 700,
+                        borderRadius: 10
+                      }}
                     >
-                      Apply {labeledItems.size} Label{labeledItems.size > 1 ? 's' : ''} & Continue
+                      ✅ Done! I Labeled {labeledItems.size} Thing{labeledItems.size > 1 ? 's' : ''}
                     </button>
                   )}
 
                   {labeledItems.size === 0 && extractedItems.length > 0 && (
                     <div style={{
-                      padding: 8,
-                      background: 'var(--bg-tertiary)',
-                      borderRadius: 4,
+                      padding: 12,
+                      background: 'rgba(255, 193, 7, 0.15)',
+                      borderRadius: 10,
                       textAlign: 'center',
-                      fontSize: 11,
-                      color: 'var(--text-secondary)'
+                      border: '2px dashed var(--accent-warning)'
                     }}>
-                      Label at least one field to continue
+                      <span style={{ fontSize: 18 }}>☝️</span>
+                      <p style={{ fontSize: 13, color: 'var(--text-primary)', margin: '8px 0 0 0' }}>
+                        Click the buttons above to tell us what each thing is!
+                      </p>
                     </div>
                   )}
                 </>
@@ -658,141 +763,121 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         )}
 
-        {/* Assigned Selectors Panel */}
+        {/* What We're Grabbing - Simplified Selectors Panel */}
         <div className={`panel ${expandedPanels.selectors ? '' : 'panel-collapsed'}`}>
           <div className="panel-header" onClick={() => togglePanel('selectors')}>
-            <span className="panel-title">Selectors ({assignedSelectors.length})</span>
+            <span className="panel-title">📋 What We're Grabbing ({assignedSelectors.length})</span>
             <span>{expandedPanels.selectors ? '−' : '+'}</span>
           </div>
           <div className="panel-content">
-            <div className="selector-list">
-              {SELECTOR_ROLES.map(({ role, label }) => {
-                const allAssigned = getAssignedAll(role);
-                return (
-                  <div key={role} className={`selector-item ${allAssigned.length > 0 ? 'assigned' : ''}`}>
-                    <div className="selector-label">
-                      {label}
-                      {allAssigned.length > 1 && (
-                        <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>
-                          ({allAssigned.length} with fallbacks)
+            {assignedSelectors.length === 0 ? (
+              <div style={{
+                padding: 20,
+                background: 'var(--bg-tertiary)',
+                borderRadius: 12,
+                textAlign: 'center'
+              }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>📭</div>
+                <p style={{ fontSize: 14, color: 'var(--text-secondary)', margin: 0 }}>
+                  Nothing yet! Use the wizard above to pick what data to grab.
+                </p>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {SELECTOR_ROLES.map(({ role, label, emoji }) => {
+                  const allAssigned = getAssignedAll(role);
+                  if (allAssigned.length === 0) return null;
+                  return (
+                    <div key={role} style={{
+                      padding: 12,
+                      background: 'rgba(0, 204, 102, 0.1)',
+                      borderRadius: 10,
+                      border: '2px solid var(--accent-success)'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: 20 }}>{emoji}</span>
+                        <span style={{ fontSize: 15, fontWeight: 600 }}>{label}</span>
+                        <span style={{
+                          marginLeft: 'auto',
+                          fontSize: 12,
+                          color: 'var(--accent-success)'
+                        }}>
+                          ✓ Set up
                         </span>
-                      )}
-                    </div>
-                    {allAssigned.length > 0 ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
-                        {allAssigned.map((assigned, idx) => (
-                          <div key={idx} style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 8,
-                            padding: '4px 6px',
-                            background: idx === 0 ? 'var(--bg-tertiary)' : 'var(--bg-secondary)',
-                            borderRadius: 3,
-                            border: idx === 0 ? '1px solid var(--accent-success)' : '1px dashed var(--border-color)'
-                          }}>
-                            <span style={{
-                              fontSize: 9,
-                              color: idx === 0 ? 'var(--accent-success)' : 'var(--text-muted)',
-                              fontWeight: 600,
-                              minWidth: 50
-                            }}>
-                              {idx === 0 ? 'PRIMARY' : `FB #${idx}`}
-                            </span>
-                            <div className="selector-value" style={{ flex: 1, margin: 0 }}>
-                              {assigned.selector.css}
-                            </div>
-                            <button
-                              className="btn btn-danger"
-                              onClick={() => removeSelector(role, assigned.priority)}
-                              style={{ padding: '2px 6px', fontSize: 10 }}
-                              title={`Remove ${idx === 0 ? 'primary' : `fallback #${idx}`}`}
-                            >
-                              ×
-                            </button>
-                          </div>
-                        ))}
                       </div>
-                    ) : (
-                      <div className="selector-value empty">Not assigned</div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Item Container */}
-            <div style={{ marginTop: 16 }}>
-              <div className="form-group">
-                <label className="form-label">
-                  Item Container <span style={{ color: 'var(--accent-error)' }}>*</span>
-                </label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Select in wizard or enter CSS selector"
-                  value={itemContainerSelector}
-                  onChange={(e) => setItemContainerSelector(e.target.value)}
-                  style={{
-                    borderColor: itemContainerSelector ? 'var(--accent-success)' : 'var(--accent-warning)',
-                  }}
-                />
-                {!itemContainerSelector && (
-                  <div style={{ fontSize: 10, color: 'var(--accent-warning)', marginTop: 4 }}>
-                    Required: Use the wizard above to select a product card
-                  </div>
-                )}
+                      {allAssigned.map((assigned, idx) => (
+                        <div key={idx} style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          padding: '6px 8px',
+                          background: 'var(--bg-secondary)',
+                          borderRadius: 6,
+                          marginTop: 6,
+                          fontSize: 12
+                        }}>
+                          <span style={{ flex: 1, color: 'var(--text-muted)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {assigned.selector.css}
+                          </span>
+                          <button
+                            className="btn btn-danger"
+                            onClick={() => removeSelector(role, assigned.priority)}
+                            style={{ padding: '4px 8px', fontSize: 11, borderRadius: 6 }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
               </div>
-            </div>
+            )}
 
-            {/* Selector Tester */}
-            <div style={{ marginTop: 16 }}>
-              <div className="form-group">
-                <label className="form-label">Test Selector</label>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input
-                    type="text"
-                    className="form-input"
-                    style={{ flex: 1 }}
-                    placeholder="CSS selector..."
-                    value={testSelectorInput}
-                    onChange={(e) => setTestSelectorInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleTestSelector()}
-                  />
-                  <button className="btn btn-primary" onClick={handleTestSelector}>
-                    Test
-                  </button>
+            {/* Show what's not set up yet */}
+            {assignedSelectors.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+                  Not grabbing yet (optional):
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {SELECTOR_ROLES.filter(r => getAssignedAll(r.role).length === 0).map(({ role, label, emoji }) => (
+                    <span key={role} style={{
+                      padding: '4px 10px',
+                      background: 'var(--bg-tertiary)',
+                      borderRadius: 20,
+                      fontSize: 12,
+                      color: 'var(--text-muted)'
+                    }}>
+                      {emoji} {label}
+                    </span>
+                  ))}
                 </div>
               </div>
-              {selectorTestResult && (
-                <div
-                  style={{
-                    padding: 8,
-                    borderRadius: 4,
-                    background: selectorTestResult.valid
-                      ? 'rgba(0, 204, 102, 0.1)'
-                      : 'rgba(255, 68, 68, 0.1)',
-                    border: `1px solid ${selectorTestResult.valid ? 'var(--accent-success)' : 'var(--accent-error)'}`,
-                    fontSize: 12,
-                  }}
-                >
-                  {selectorTestResult.valid
-                    ? `Found ${selectorTestResult.count} element(s)`
-                    : selectorTestResult.error || 'Invalid selector'}
-                </div>
-              )}
-            </div>
+            )}
           </div>
         </div>
 
-        {/* Pagination Settings */}
+        {/* Pagination Settings - Simplified */}
         {getAssigned('nextPage') && (
           <div className="panel">
             <div className="panel-header">
-              <span className="panel-title">Pagination</span>
+              <span className="panel-title">📄 How Many Pages?</span>
             </div>
             <div className="panel-content">
+              <div style={{
+                padding: 12,
+                background: 'rgba(0, 153, 255, 0.1)',
+                borderRadius: 10,
+                border: '1px solid var(--accent-primary)',
+                marginBottom: 12
+              }}>
+                <p style={{ fontSize: 13, color: 'var(--text-primary)', margin: 0 }}>
+                  🎉 You set up a "Next Page" button! How many pages should we grab?
+                </p>
+              </div>
               <div className="form-group">
-                <label className="form-label">Max Pages</label>
+                <label className="form-label" style={{ fontSize: 14 }}>Number of pages to grab:</label>
                 <input
                   type="number"
                   className="form-input"
@@ -800,66 +885,92 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   max={100}
                   value={maxPages}
                   onChange={(e) => setMaxPages(parseInt(e.target.value) || 1)}
+                  style={{ fontSize: 16, padding: '12px', textAlign: 'center' }}
                 />
               </div>
             </div>
           </div>
         )}
 
-        {/* Results Panel */}
+        {/* Results Panel - Simplified */}
         {scrapeResult && (
-          <div className={`panel ${expandedPanels.results ? '' : 'panel-collapsed'}`}>
-            <div className="panel-header" onClick={() => togglePanel('results')}>
-              <span className="panel-title">
-                Results ({scrapeResult.items.length} items)
+          <div className={`panel ${expandedPanels.results ? '' : 'panel-collapsed'}`} style={{ border: '2px solid var(--accent-success)' }}>
+            <div className="panel-header" onClick={() => togglePanel('results')} style={{ background: 'var(--accent-success)' }}>
+              <span className="panel-title" style={{ color: 'white', fontSize: 16 }}>
+                🎉 We Got {scrapeResult.items.length} Items!
               </span>
-              <span>{expandedPanels.results ? '−' : '+'}</span>
+              <span style={{ color: 'white' }}>{expandedPanels.results ? '−' : '+'}</span>
             </div>
             <div className="panel-content">
-              <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
-                {scrapeResult.success ? (
-                  <>
-                    Scraped {scrapeResult.pagesScraped} page(s) in{' '}
-                    {(scrapeResult.duration / 1000).toFixed(2)}s
-                  </>
-                ) : (
-                  <span style={{ color: 'var(--accent-error)' }}>
-                    Error: {scrapeResult.errors?.join(', ')}
-                  </span>
-                )}
-              </div>
+              {scrapeResult.success ? (
+                <div style={{
+                  padding: 12,
+                  background: 'rgba(0, 204, 102, 0.1)',
+                  borderRadius: 10,
+                  marginBottom: 12,
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: 28, marginBottom: 4 }}>✅</div>
+                  <p style={{ fontSize: 14, color: 'var(--text-primary)', margin: 0 }}>
+                    Got <strong>{scrapeResult.items.length}</strong> products from <strong>{scrapeResult.pagesScraped}</strong> page{scrapeResult.pagesScraped > 1 ? 's' : ''}!
+                  </p>
+                </div>
+              ) : (
+                <div style={{
+                  padding: 12,
+                  background: 'rgba(255, 68, 68, 0.1)',
+                  borderRadius: 10,
+                  marginBottom: 12,
+                  textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: 28, marginBottom: 4 }}>😕</div>
+                  <p style={{ fontSize: 14, color: 'var(--accent-error)', margin: 0 }}>
+                    Something went wrong: {scrapeResult.errors?.join(', ')}
+                  </p>
+                </div>
+              )}
 
               {scrapeResult.items.length > 0 && (
-                <div style={{ maxHeight: 300, overflowY: 'auto' }}>
-                  {scrapeResult.items.slice(0, 10).map((item, idx) => (
+                <div style={{ maxHeight: 300, overflowY: 'auto', marginBottom: 12 }}>
+                  <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    Here's a preview (first {Math.min(5, scrapeResult.items.length)}):
+                  </p>
+                  {scrapeResult.items.slice(0, 5).map((item, idx) => (
                     <div
                       key={idx}
                       style={{
-                        padding: 8,
+                        padding: 10,
                         background: 'var(--bg-tertiary)',
-                        borderRadius: 4,
-                        marginBottom: 4,
-                        fontSize: 12,
+                        borderRadius: 8,
+                        marginBottom: 8,
+                        fontSize: 13,
                       }}
                     >
-                      {Object.entries(item).map(([key, value]) => (
-                        <div key={key} style={{ marginBottom: 2 }}>
-                          <strong style={{ color: 'var(--text-secondary)' }}>{key}:</strong>{' '}
-                          {value || <em style={{ color: 'var(--text-muted)' }}>null</em>}
-                        </div>
-                      ))}
+                      {Object.entries(item).map(([key, value]) => {
+                        const roleInfo = SELECTOR_ROLES.find(r => r.role === key);
+                        return (
+                          <div key={key} style={{ marginBottom: 4, display: 'flex', gap: 6 }}>
+                            <span style={{ color: 'var(--text-muted)', minWidth: 80 }}>
+                              {roleInfo?.emoji} {roleInfo?.label || key}:
+                            </span>
+                            <span style={{ color: value ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                              {value || '(empty)'}
+                            </span>
+                          </div>
+                        );
+                      })}
                     </div>
                   ))}
-                  {scrapeResult.items.length > 10 && (
-                    <div style={{ textAlign: 'center', padding: 8, color: 'var(--text-muted)' }}>
-                      ...and {scrapeResult.items.length - 10} more
+                  {scrapeResult.items.length > 5 && (
+                    <div style={{ textAlign: 'center', padding: 8, color: 'var(--text-muted)', fontSize: 13 }}>
+                      ...and {scrapeResult.items.length - 5} more products!
                     </div>
                   )}
                 </div>
               )}
 
               <button
-                className="btn"
+                className="btn btn-primary"
                 onClick={() => {
                   const dataStr = JSON.stringify(scrapeResult.items, null, 2);
                   const blob = new Blob([dataStr], { type: 'application/json' });
@@ -870,55 +981,111 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   a.click();
                   URL.revokeObjectURL(url);
                 }}
-                style={{ width: '100%', marginTop: 12 }}
+                style={{
+                  width: '100%',
+                  padding: '14px 16px',
+                  fontSize: 16,
+                  fontWeight: 600,
+                  borderRadius: 10
+                }}
               >
-                Export JSON
+                💾 Download My Data
               </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Execute Button */}
-      <div style={{ padding: 16, borderTop: '1px solid var(--border-color)' }}>
-        <div className="form-group" style={{ marginBottom: 12 }}>
-          <label className="form-label">Scraper Name</label>
+      {/* Execute Section - Big and Clear */}
+      <div style={{
+        padding: 20,
+        borderTop: '2px solid var(--border-color)',
+        background: 'var(--bg-secondary)'
+      }}>
+        {/* Name input - simplified */}
+        <div className="form-group" style={{ marginBottom: 16 }}>
+          <label className="form-label" style={{ fontSize: 14, fontWeight: 600 }}>
+            📝 Name your grabber:
+          </label>
           <input
             type="text"
             className="form-input"
             value={scraperName}
             onChange={(e) => setScraperName(e.target.value)}
+            placeholder="My Data Grabber"
+            style={{
+              fontSize: 15,
+              padding: '12px 14px',
+              borderRadius: 10
+            }}
           />
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {onSaveScraper && (
-            <button
-              className="btn"
-              onClick={onSaveScraper}
-              style={{ flex: 1, padding: '12px 16px', fontSize: 14 }}
-            >
-              Save
-            </button>
-          )}
+
+        {/* Buttons */}
+        <div style={{ display: 'flex', gap: 10, flexDirection: 'column' }}>
+          {/* Main action button - THE BIG ONE */}
           <button
             className="btn btn-success"
             onClick={handleExecuteScrape}
             disabled={assignedSelectors.length === 0 || !itemContainerSelector || isScrapingRunning}
-            style={{ flex: onSaveScraper ? 1 : undefined, width: onSaveScraper ? undefined : '100%', padding: '12px 16px', fontSize: 14 }}
-            title={!itemContainerSelector ? 'Please select an item container first' : assignedSelectors.length === 0 ? 'Please assign at least one selector' : ''}
+            style={{
+              width: '100%',
+              padding: '18px 20px',
+              fontSize: 18,
+              fontWeight: 700,
+              borderRadius: 12,
+              opacity: (assignedSelectors.length === 0 || !itemContainerSelector) ? 0.5 : 1
+            }}
           >
             {isScrapingRunning ? (
-              <>
-                <div className="loading-spinner" style={{ width: 16, height: 16 }} />
-                Scraping...
-              </>
+              <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                <div className="loading-spinner" style={{ width: 20, height: 20 }} />
+                Grabbing Data...
+              </span>
             ) : !itemContainerSelector ? (
-              'Select Container First'
+              '👆 First, pick a product above'
+            ) : assignedSelectors.length === 0 ? (
+              '🏷️ First, label some info above'
             ) : (
-              'Execute Scrape'
+              '🚀 Grab All The Data!'
             )}
           </button>
+
+          {/* Save button - secondary */}
+          {onSaveScraper && (
+            <button
+              className="btn"
+              onClick={onSaveScraper}
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                fontSize: 14,
+                borderRadius: 10
+              }}
+            >
+              💾 Save For Later
+            </button>
+          )}
         </div>
+
+        {/* Help text when not ready */}
+        {(assignedSelectors.length === 0 || !itemContainerSelector) && (
+          <div style={{
+            marginTop: 12,
+            padding: 12,
+            background: 'rgba(255, 193, 7, 0.1)',
+            borderRadius: 10,
+            textAlign: 'center',
+            border: '1px dashed var(--accent-warning)'
+          }}>
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>
+              {!itemContainerSelector
+                ? '👆 Click "Start Picking" and click on a product to get started!'
+                : '🏷️ Almost there! Label at least one piece of info (like the name or price).'
+              }
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,0 +1,20 @@
+{
+  "competitor_type": "local",
+  "country": "United Kingdom",
+  "url": "https://www2.hm.com/en_gb/ladies/shoes/loafers.html",
+  "selectors": {
+    "Title": [
+      "h2.ec794b.b01e0a.e38636"
+    ],
+    "Price": [
+      "span.c52734.fea13a"
+    ],
+    "URL": [
+      "a.e67517"
+    ],
+    "Image": [
+      "div.ca86b6.c0c7de.c98a51 > span > img"
+    ]
+  },
+  "itemContainer": "article"
+}

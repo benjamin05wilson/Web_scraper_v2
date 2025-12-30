@@ -271,26 +271,31 @@ export class InteractionRecorder {
   private async validateAndAddAction(action: RecorderAction): Promise<void> {
     if (!this.currentSequence) return;
 
-    // Validate selector exists
-    const exists = await this.page.evaluate((sel) => {
-      try {
-        // Handle :has-text() pseudo-selector for validation
-        const cleanSelector = sel.replace(/:has-text\("[^"]*"\)/g, '');
-        return document.querySelectorAll(cleanSelector).length > 0;
-      } catch {
-        return false;
+    try {
+      // Validate selector exists
+      const exists = await this.page.evaluate((sel) => {
+        try {
+          // Handle :has-text() pseudo-selector for validation
+          const cleanSelector = sel.replace(/:has-text\("[^"]*"\)/g, '');
+          return document.querySelectorAll(cleanSelector).length > 0;
+        } catch {
+          return false;
+        }
+      }, action.selector);
+
+      if (!exists) {
+        console.warn(`[InteractionRecorder] Invalid selector, not recording: ${action.selector}`);
+        return;
       }
-    }, action.selector);
 
-    if (!exists) {
-      console.warn(`[InteractionRecorder] Invalid selector, not recording: ${action.selector}`);
-      return;
+      this.currentSequence.actions.push(action);
+      this.onAction?.(action);
+
+      console.log(`[InteractionRecorder] Recorded: ${action.type} on ${action.selector}`);
+    } catch (error) {
+      // Page might have navigated, which destroys execution context - this is normal
+      console.warn(`[InteractionRecorder] Could not validate action (page may have navigated): ${action.selector}`);
     }
-
-    this.currentSequence.actions.push(action);
-    this.onAction?.(action);
-
-    console.log(`[InteractionRecorder] Recorded: ${action.type} on ${action.selector}`);
   }
 
   async startRecording(name: string, description?: string): Promise<RecorderSequence> {

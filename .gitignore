@@ -38,3 +38,5 @@ scrape-results*.json
 
 # Windows null file
 nul
+
+*.csv

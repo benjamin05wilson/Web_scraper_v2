@@ -4,6 +4,8 @@
 
 import type { Page, CDPSession } from 'playwright';
 import type { ElementSelector, DOMHighlight, UrlHoverPayload, ContainerContentPayload, ExtractedContentItem } from '../../shared/types.js';
+import { ProductDetector } from './ProductDetector.js';
+import type { DetectionResult } from '../types/detection-types.js';
 
 // Script injected into the page for DOM inspection
 const DOM_INSPECTION_SCRIPT = `
@@ -159,6 +161,15 @@ const DOM_INSPECTION_SCRIPT = `
   function getGenericSelector(el) {
     const tag = el.tagName.toLowerCase();
 
+    // Strategy 0: For semantic tags like article, just use the tag if it matches multiple items
+    const semanticTags = ['article', 'section', 'li', 'tr', 'figure', 'card'];
+    if (semanticTags.includes(tag)) {
+      const tagMatches = document.querySelectorAll(tag);
+      if (tagMatches.length >= 2 && tagMatches.length <= 200) {
+        return tag;
+      }
+    }
+
     // Strategy 1: Find a class that matches multiple similar elements
     if (el.classList.length > 0) {
       for (const className of el.classList) {
@@ -170,12 +181,25 @@ const DOM_INSPECTION_SCRIPT = `
 
         // Good if it matches 2+ elements but not too many (likely structural)
         if (matches.length >= 2 && matches.length <= 100) {
-          // Verify these are similar elements (same parent type or structure)
+          // Verify these are similar elements (same parent TYPE, not necessarily same parent element)
           const firstParent = matches[0].parentElement?.tagName;
-          const allSameParent = Array.from(matches).every(m => m.parentElement?.tagName === firstParent);
-          if (allSameParent) {
+          const allSameParentType = Array.from(matches).every(m => m.parentElement?.tagName === firstParent);
+          if (allSameParentType) {
             return classSelector;
           }
+        }
+      }
+
+      // Strategy 1b: Relax parent check - just verify count is reasonable for product grids
+      for (const className of el.classList) {
+        if (className.match(/^[0-9]|hover|active|focus|selected|current|open|close/i)) continue;
+
+        const classSelector = tag + '.' + CSS.escape(className);
+        const matches = document.querySelectorAll(classSelector);
+
+        // Accept 2-200 matches even if parents differ (common for product grids)
+        if (matches.length >= 2 && matches.length <= 200) {
+          return classSelector;
         }
       }
     }
@@ -401,6 +425,15 @@ const DOM_INSPECTION_SCRIPT = `
 
     const el = getBestElementAtPoint(e.clientX, e.clientY);
     if (el && el.id !== '__scraper_highlight__') {
+      // Clear any previous data-scraper-detected attribute
+      const prevDetected = document.querySelector('[data-scraper-detected="true"]');
+      if (prevDetected) {
+        prevDetected.removeAttribute('data-scraper-detected');
+      }
+
+      // Mark this element for fallback detection
+      el.setAttribute('data-scraper-detected', 'true');
+
       // Update highlight to show what was clicked
       updateHighlight(el);
       lastHoveredElement = el;
@@ -795,6 +828,88 @@ const DOM_INSPECTION_SCRIPT = `
         window.__scraperScrollHandler = null;
       }
       window.__scraperHighlights = null;
+    },
+
+    // Highlight a single selected element with scroll tracking
+    highlightSelected(selector) {
+      try {
+        console.log('[Injected] highlightSelected called with:', selector);
+
+        // Remove existing selected highlight (check both body and documentElement)
+        document.querySelectorAll('.__scraper_selected_highlight__').forEach(el => el.remove());
+        if (document.documentElement) {
+          document.documentElement.querySelectorAll('.__scraper_selected_highlight__').forEach(el => el.remove());
+        }
+        if (window.__scraperSelectedScrollHandler) {
+          window.removeEventListener('scroll', window.__scraperSelectedScrollHandler, true);
+        }
+
+        // Try to find element - first by selector, then by data attribute fallback
+        let el = null;
+        try {
+          el = document.querySelector(selector);
+        } catch (e) {
+          console.log('[Injected] querySelector failed:', e.message);
+        }
+
+        // Fallback: use data-scraper-detected attribute
+        if (!el) {
+          el = document.querySelector('[data-scraper-detected="true"]');
+          if (el) console.log('[Injected] Using data-scraper-detected fallback');
+        }
+
+        if (!el) {
+          console.log('[Injected] Element not found');
+          return false;
+        }
+
+        const rect = el.getBoundingClientRect();
+        console.log('[Injected] Element rect:', rect.top, rect.left, rect.width, rect.height);
+
+        const highlight = document.createElement('div');
+        highlight.className = '__scraper_selected_highlight__';
+        highlight.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;border:3px solid #00cc66;background:rgba(0,204,102,0.2);top:' + rect.top + 'px;left:' + rect.left + 'px;width:' + rect.width + 'px;height:' + rect.height + 'px;border-radius:4px;box-shadow:0 0 10px rgba(0,204,102,0.5);';
+
+        // Append to documentElement (html) instead of body to avoid site scripts removing it
+        (document.documentElement || document.body).appendChild(highlight);
+        console.log('[Injected] Highlight created at', rect.top, rect.left, rect.width, rect.height);
+
+        // Store for scroll updates
+        window.__scraperSelectedHighlight = { highlight, target: el };
+
+        // Update position on scroll
+        const updatePosition = () => {
+          if (!window.__scraperSelectedHighlight) return;
+          const { highlight, target } = window.__scraperSelectedHighlight;
+          const r = target.getBoundingClientRect();
+          highlight.style.top = r.top + 'px';
+          highlight.style.left = r.left + 'px';
+          highlight.style.width = r.width + 'px';
+          highlight.style.height = r.height + 'px';
+        };
+
+        window.__scraperSelectedScrollHandler = updatePosition;
+        window.addEventListener('scroll', updatePosition, true);
+
+        return true;
+      } catch (e) {
+        console.log('[Injected] highlightSelected error:', e.message || e);
+        return false;
+      }
+    },
+
+    // Clear selected highlight
+    clearSelectedHighlight() {
+      console.log('[Injected] clearSelectedHighlight called');
+      document.querySelectorAll('.__scraper_selected_highlight__').forEach(el => el.remove());
+      if (document.documentElement) {
+        document.documentElement.querySelectorAll('.__scraper_selected_highlight__').forEach(el => el.remove());
+      }
+      if (window.__scraperSelectedScrollHandler) {
+        window.removeEventListener('scroll', window.__scraperSelectedScrollHandler, true);
+        window.__scraperSelectedScrollHandler = null;
+      }
+      window.__scraperSelectedHighlight = null;
     }
   };
 })();
@@ -808,10 +923,12 @@ export class DOMInspector {
   private onSelect?: (info: ElementSelector) => void;
   private onUrlHover?: (info: UrlHoverPayload | null) => void;
   private urlCaptureEnabled: boolean = false;
+  private productDetector: ProductDetector;
 
   constructor(page: Page, cdp: CDPSession) {
     this.page = page;
     this.cdp = cdp;
+    this.productDetector = new ProductDetector(page, cdp);
   }
 
   async inject(): Promise<void> {
@@ -921,17 +1038,61 @@ export class DOMInspector {
   // =========================================================================
 
   async highlightWithCDP(selector: string): Promise<DOMHighlight | null> {
+    console.log('[DOMInspector] CDP highlight for selector:', selector);
+
     try {
+      // Enable Overlay domain if not already enabled
+      try {
+        await this.cdp.send('Overlay.enable');
+      } catch (e) {
+        // May already be enabled
+      }
+
       // Get document
       const { root } = await this.cdp.send('DOM.getDocument', { depth: 0 });
 
-      // Query selector
-      const { nodeId } = await this.cdp.send('DOM.querySelector', {
-        nodeId: root.nodeId,
-        selector,
-      });
+      // Try CDP querySelector first
+      let nodeId: number | undefined;
+      try {
+        const result = await this.cdp.send('DOM.querySelector', {
+          nodeId: root.nodeId,
+          selector,
+        });
+        nodeId = result.nodeId;
+        console.log('[DOMInspector] CDP querySelector nodeId:', nodeId);
+      } catch (e) {
+        console.log('[DOMInspector] CDP querySelector failed, trying fallback');
+      }
 
-      if (!nodeId) return null;
+      // If CDP querySelector failed, use page.evaluate to get bounding box and highlight by rect
+      if (!nodeId) {
+        console.log('[DOMInspector] Using bounding box fallback for highlight');
+        const rect = await this.page.evaluate((sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.x, y: r.y, width: r.width, height: r.height };
+        }, selector);
+
+        if (rect) {
+          // Highlight using highlightRect instead of highlightNode
+          await this.cdp.send('Overlay.highlightRect', {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            color: { r: 0, g: 204, b: 102, a: 0.2 },
+            outlineColor: { r: 0, g: 204, b: 102, a: 1 },
+          });
+          console.log('[DOMInspector] Highlighted using rect fallback');
+          return {
+            selector,
+            boundingBox: rect,
+            tagName: 'div',
+          };
+        }
+        return null;
+      }
 
       // Get box model
       const { model } = await this.cdp.send('DOM.getBoxModel', { nodeId });
@@ -940,12 +1101,13 @@ export class DOMInspector {
       // Get node info
       const { node } = await this.cdp.send('DOM.describeNode', { nodeId });
 
-      // Highlight using CDP Overlay
+      // Highlight using CDP Overlay - green color to match selection highlight
       await this.cdp.send('Overlay.highlightNode', {
         highlightConfig: {
-          contentColor: { r: 0, g: 102, b: 255, a: 0.1 },
-          borderColor: { r: 0, g: 102, b: 255, a: 1 },
-          paddingColor: { r: 0, g: 102, b: 255, a: 0.05 },
+          contentColor: { r: 0, g: 204, b: 102, a: 0.2 },
+          borderColor: { r: 0, g: 204, b: 102, a: 1 },
+          paddingColor: { r: 0, g: 204, b: 102, a: 0.1 },
+          showInfo: true, // Shows element tag info
         },
         nodeId,
       });
@@ -994,6 +1156,32 @@ export class DOMInspector {
   async clearMultiHighlight(): Promise<void> {
     await this.page.evaluate(() => {
       (window as any).__scraperInspector?.clearMultiHighlight();
+    });
+  }
+
+  // Highlight a selected element with scroll tracking (stays in place when scrolling)
+  async highlightSelected(selector: string): Promise<boolean> {
+    await this.inject();
+    console.log('[DOMInspector] highlightSelected called with:', selector);
+    const result = await this.page.evaluate((sel) => {
+      console.log('[Browser] highlightSelected selector:', sel);
+      console.log('[Browser] __scraperInspector exists:', !!(window as any).__scraperInspector);
+      if (!(window as any).__scraperInspector) {
+        console.log('[Browser] ERROR: __scraperInspector not injected!');
+        return false;
+      }
+      const success = (window as any).__scraperInspector.highlightSelected(sel);
+      console.log('[Browser] highlightSelected result:', success);
+      return success;
+    }, selector);
+    console.log('[DOMInspector] highlightSelected result:', result);
+    return result;
+  }
+
+  // Clear selected highlight
+  async clearSelectedHighlight(): Promise<void> {
+    await this.page.evaluate(() => {
+      (window as any).__scraperInspector?.clearSelectedHighlight();
     });
   }
 
@@ -1046,12 +1234,33 @@ export class DOMInspector {
 
   async extractContainerContent(selector: string): Promise<ContainerContentPayload> {
     await this.inject();
+    console.log('[DOMInspector] extractContainerContent called with:', selector);
 
     // Use a string-based function to avoid TypeScript transpilation issues
+    // Supports comma-separated selectors (e.g., for Zara's split layout)
     const extractionScript = `
       (function(containerSelector) {
-        var container = document.querySelector(containerSelector);
-        if (!container) return [];
+        console.log('[Browser] extractContainerContent selector:', containerSelector);
+
+        // Handle multiple comma-separated selectors
+        var selectors = containerSelector.split(',').map(function(s) { return s.trim(); });
+        var containers = [];
+
+        for (var i = 0; i < selectors.length; i++) {
+          console.log('[Browser] Trying selector:', selectors[i]);
+          var container = document.querySelector(selectors[i]);
+          console.log('[Browser] Found container:', container ? 'YES' : 'NO');
+          if (container) {
+            containers.push(container);
+          }
+        }
+
+        console.log('[Browser] Total containers found:', containers.length);
+        if (containers.length > 0) {
+          console.log('[Browser] First container tagName:', containers[0].tagName);
+          console.log('[Browser] First container outerHTML (first 200):', containers[0].outerHTML.substring(0, 200));
+        }
+        if (containers.length === 0) return [];
 
         var extracted = [];
         var seen = {};
@@ -1088,24 +1297,27 @@ export class DOMInspector {
             });
 
             if (validClasses.length > 0) {
+              // Escape classes for CSS selector (handles @, /, etc.)
+              var escapedClasses = validClasses.map(function(c) { return CSS.escape(c); });
+
               // Try all classes together first for maximum specificity
-              var fullSelector = tag + '.' + validClasses.join('.');
+              var fullSelector = tag + '.' + escapedClasses.join('.');
               if (isUnique(fullSelector)) {
                 return fullSelector;
               }
 
               // Try each class individually
-              for (var i = 0; i < validClasses.length; i++) {
-                var singleSelector = tag + '.' + validClasses[i];
+              for (var i = 0; i < escapedClasses.length; i++) {
+                var singleSelector = tag + '.' + escapedClasses[i];
                 if (isUnique(singleSelector)) {
                   return singleSelector;
                 }
               }
 
               // If single classes don't work, try combinations
-              for (var i = 0; i < validClasses.length; i++) {
-                for (var j = i + 1; j < validClasses.length; j++) {
-                  var comboSelector = tag + '.' + validClasses[i] + '.' + validClasses[j];
+              for (var i = 0; i < escapedClasses.length; i++) {
+                for (var j = i + 1; j < escapedClasses.length; j++) {
+                  var comboSelector = tag + '.' + escapedClasses[i] + '.' + escapedClasses[j];
                   if (isUnique(comboSelector)) {
                     return comboSelector;
                   }
@@ -1155,95 +1367,633 @@ export class DOMInspector {
           return tag;
         }
 
-        // Extract all text nodes (leaf text content)
-        var walker = document.createTreeWalker(
-          container,
-          NodeFilter.SHOW_TEXT,
-          null
-        );
+        // Process each container
+        for (var c = 0; c < containers.length; c++) {
+          var container = containers[c];
 
-        var textNodeParents = new Set();
-        var node;
-        while ((node = walker.nextNode())) {
-          var text = node.textContent ? node.textContent.trim() : '';
-          if (text && text.length > 0 && text.length < 200) {
-            var parent = node.parentElement;
-            if (parent && !textNodeParents.has(parent)) {
-              textNodeParents.add(parent);
+          // Extract all text nodes (leaf text content)
+          var walker = document.createTreeWalker(
+            container,
+            NodeFilter.SHOW_TEXT,
+            null
+          );
+
+          var textNodeParents = new Set();
+          var node;
+          while ((node = walker.nextNode())) {
+            var text = node.textContent ? node.textContent.trim() : '';
+            if (text && text.length > 0 && text.length < 200) {
+              var parent = node.parentElement;
+              if (parent && !textNodeParents.has(parent)) {
+                textNodeParents.add(parent);
+                addItem({
+                  type: 'text',
+                  value: text,
+                  selector: getRelativeSelector(parent, container),
+                  displayText: text.length > 60 ? text.substring(0, 60) + '...' : text,
+                  tagName: parent.tagName.toLowerCase()
+                });
+              }
+            }
+          }
+
+          // SPECIAL HANDLING: Look for split prices (currency symbol in one element, number in adjacent element)
+          // Common pattern: <span>$</span><span>99.99</span> or similar
+          // Also handles price ranges like "$59.95 - $379.95"
+          var priceContainers = container.querySelectorAll('[class*="price"], [class*="Price"], [class*="cost"], [class*="Cost"], [class*="amount"], [class*="Amount"]');
+          for (var p = 0; p < priceContainers.length; p++) {
+            var priceEl = priceContainers[p];
+            // Get the combined text of this element and its children, preserving some spacing for ranges
+            var fullPriceText = priceEl.textContent ? priceEl.textContent.trim().replace(/\\s+/g, ' ') : '';
+
+            // First try to match a price RANGE (e.g., "$59.95 - $379.95" or "$29.98 - $189.98")
+            var priceRangeMatch = fullPriceText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?\\s*[-–—]\\s*[£$€¥₹]?\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
+            if (priceRangeMatch) {
+              var fullPriceRange = priceRangeMatch[0].replace(/\\s+/g, ' ').trim();
               addItem({
                 type: 'text',
-                value: text,
-                selector: getRelativeSelector(parent, container),
-                displayText: text.length > 60 ? text.substring(0, 60) + '...' : text,
-                tagName: parent.tagName.toLowerCase()
+                value: fullPriceRange,
+                selector: getRelativeSelector(priceEl, container),
+                displayText: fullPriceRange,
+                tagName: priceEl.tagName.toLowerCase(),
+                isPrice: true
+              });
+            } else {
+              // Try single price pattern
+              var priceMatch = fullPriceText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
+              if (priceMatch) {
+                var fullPrice = priceMatch[0];
+                addItem({
+                  type: 'text',
+                  value: fullPrice,
+                  selector: getRelativeSelector(priceEl, container),
+                  displayText: fullPrice,
+                  tagName: priceEl.tagName.toLowerCase(),
+                  isPrice: true
+                });
+              }
+            }
+          }
+
+          // Also check for elements that contain ONLY a currency symbol and combine with next sibling
+          var allElements = container.querySelectorAll('*');
+          for (var e = 0; e < allElements.length; e++) {
+            var el = allElements[e];
+            var elText = el.textContent ? el.textContent.trim() : '';
+            // Check if element contains ONLY a currency symbol
+            if (/^[£$€¥₹]$/.test(elText)) {
+              // Look at the parent's full text content - it might have the full price
+              var priceParent = el.parentElement;
+              if (priceParent) {
+                var parentText = priceParent.textContent ? priceParent.textContent.trim().replace(/\\s+/g, ' ') : '';
+                // Try price range first
+                var parentRangeMatch = parentText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?\\s*[-–—]\\s*[£$€¥₹]?\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
+                if (parentRangeMatch) {
+                  addItem({
+                    type: 'text',
+                    value: parentRangeMatch[0].replace(/\\s+/g, ' ').trim(),
+                    selector: getRelativeSelector(priceParent, container),
+                    displayText: parentRangeMatch[0].replace(/\\s+/g, ' ').trim(),
+                    tagName: priceParent.tagName.toLowerCase(),
+                    isPrice: true
+                  });
+                } else {
+                  var parentPriceMatch = parentText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
+                  if (parentPriceMatch) {
+                    addItem({
+                      type: 'text',
+                      value: parentPriceMatch[0],
+                      selector: getRelativeSelector(priceParent, container),
+                      displayText: parentPriceMatch[0],
+                      tagName: priceParent.tagName.toLowerCase(),
+                      isPrice: true
+                    });
+                  }
+                }
+              }
+            }
+          }
+
+          // ADDITIONAL: Find ALL price-like text in the container (for multiple price rows)
+          // This catches cases where there are multiple prices not in [class*="price"] elements
+          // We need to find the actual elements containing these prices
+          var allElementsForPrices = container.querySelectorAll('*');
+          for (var ep = 0; ep < allElementsForPrices.length; ep++) {
+            var priceEl = allElementsForPrices[ep];
+            // Skip if this element has children (we want leaf-ish elements)
+            // But allow elements with only text children or span/small children
+            var hasBlockChildren = false;
+            for (var ch = 0; ch < priceEl.children.length; ch++) {
+              var childTag = priceEl.children[ch].tagName.toLowerCase();
+              if (['div', 'p', 'ul', 'li', 'article', 'section'].indexOf(childTag) !== -1) {
+                hasBlockChildren = true;
+                break;
+              }
+            }
+            if (hasBlockChildren) continue;
+
+            var elPriceText = priceEl.textContent ? priceEl.textContent.trim().replace(/\\s+/g, ' ') : '';
+            // Check for price range pattern
+            var elPriceRangeMatch = elPriceText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?\\s*[-–—]\\s*[£$€¥₹]?\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
+            if (elPriceRangeMatch) {
+              var foundRange = elPriceRangeMatch[0].replace(/\\s+/g, ' ').trim();
+              addItem({
+                type: 'text',
+                value: foundRange,
+                selector: getRelativeSelector(priceEl, container),
+                displayText: foundRange,
+                tagName: priceEl.tagName.toLowerCase(),
+                isPrice: true
               });
             }
           }
+
+          // Extract all links
+          var links = container.querySelectorAll('a[href]');
+          console.log('[Browser] Found links in container:', links.length);
+          console.log('[Browser] Container tagName:', container.tagName);
+
+          // Check if the container itself is a link (common pattern where <a> wraps everything)
+          if (container.tagName === 'A' && container.getAttribute('href')) {
+            var containerHref = container.getAttribute('href');
+            console.log('[Browser] Container IS a link:', containerHref);
+            if (containerHref && !containerHref.startsWith('#') && !containerHref.startsWith('javascript:')) {
+              var containerUrl = containerHref;
+              try {
+                containerUrl = new URL(containerHref, window.location.href).href;
+              } catch (e) {
+                containerUrl = containerHref;
+              }
+              addItem({
+                type: 'link',
+                value: containerUrl,
+                selector: '',
+                displayText: containerUrl.length > 60 ? containerUrl.substring(0, 60) + '...' : containerUrl,
+                tagName: 'a'
+              });
+            }
+          }
+
+          // Also check if container is INSIDE a link (Dunelm pattern: div inside <a>)
+          if (links.length === 0 && container.tagName !== 'A') {
+            var parentLink = container.closest('a[href]');
+            if (parentLink) {
+              var parentHref = parentLink.getAttribute('href');
+              console.log('[Browser] Container is INSIDE a link:', parentHref);
+              if (parentHref && !parentHref.startsWith('#') && !parentHref.startsWith('javascript:')) {
+                var parentUrl = parentHref;
+                try {
+                  parentUrl = new URL(parentHref, window.location.href).href;
+                } catch (e) {
+                  parentUrl = parentHref;
+                }
+                addItem({
+                  type: 'link',
+                  value: parentUrl,
+                  selector: ':parent-link',
+                  displayText: parentUrl.length > 60 ? parentUrl.substring(0, 60) + '...' : parentUrl,
+                  tagName: 'a'
+                });
+              }
+            }
+          }
+
+          links.forEach(function(link) {
+            var href = link.getAttribute('href');
+            console.log('[Browser] Processing link href:', href);
+            if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+              // Resolve relative URLs
+              var fullUrl = href;
+              try {
+                fullUrl = new URL(href, window.location.href).href;
+              } catch (e) {
+                fullUrl = href;
+              }
+              console.log('[Browser] Adding link:', fullUrl.substring(0, 50));
+
+              addItem({
+                type: 'link',
+                value: fullUrl,
+                selector: getRelativeSelector(link, container),
+                displayText: fullUrl.length > 60 ? fullUrl.substring(0, 60) + '...' : fullUrl,
+                tagName: 'a'
+              });
+            }
+          });
+
+          // Extract all images
+          var images = container.querySelectorAll('img[src]');
+          images.forEach(function(img) {
+            var src = img.getAttribute('src');
+            if (src) {
+              // Resolve relative URLs
+              var fullUrl = src;
+              try {
+                fullUrl = new URL(src, window.location.href).href;
+              } catch (e) {
+                fullUrl = src;
+              }
+
+              var alt = img.getAttribute('alt');
+              addItem({
+                type: 'image',
+                value: fullUrl,
+                selector: getRelativeSelector(img, container),
+                displayText: alt || fullUrl.split('/').pop() || fullUrl,
+                tagName: 'img'
+              });
+            }
+          });
         }
-
-        // Extract all links
-        var links = container.querySelectorAll('a[href]');
-        links.forEach(function(link) {
-          var href = link.getAttribute('href');
-          if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-            // Resolve relative URLs
-            var fullUrl = href;
-            try {
-              fullUrl = new URL(href, window.location.href).href;
-            } catch (e) {
-              fullUrl = href;
-            }
-
-            addItem({
-              type: 'link',
-              value: fullUrl,
-              selector: getRelativeSelector(link, container),
-              displayText: fullUrl.length > 60 ? fullUrl.substring(0, 60) + '...' : fullUrl,
-              tagName: 'a'
-            });
-          }
-        });
-
-        // Extract all images
-        var images = container.querySelectorAll('img[src]');
-        images.forEach(function(img) {
-          var src = img.getAttribute('src');
-          if (src) {
-            // Resolve relative URLs
-            var fullUrl = src;
-            try {
-              fullUrl = new URL(src, window.location.href).href;
-            } catch (e) {
-              fullUrl = src;
-            }
-
-            var alt = img.getAttribute('alt');
-            addItem({
-              type: 'image',
-              value: fullUrl,
-              selector: getRelativeSelector(img, container),
-              displayText: alt || fullUrl.split('/').pop() || fullUrl,
-              tagName: 'img'
-            });
-          }
-        });
 
         return extracted;
       })
     `;
 
-    const items = await this.page.evaluate(
-      ({ script, sel }) => {
-        // eslint-disable-next-line no-eval
-        const fn = eval(script);
-        return fn(sel);
-      },
-      { script: extractionScript, sel: selector }
-    ) as ExtractedContentItem[];
+    // Retry extraction if no items found (handles lazy-loaded content)
+    let items: ExtractedContentItem[] = [];
+    let attempts = 0;
+    const maxAttempts = 3;
 
+    while (attempts < maxAttempts) {
+      items = await this.page.evaluate(
+        ({ script, sel }) => {
+          // eslint-disable-next-line no-eval
+          const fn = eval(script);
+          const result = fn(sel);
+          console.log('[Browser] Extracted items count:', result ? result.length : 0);
+          return result;
+        },
+        { script: extractionScript, sel: selector }
+      ) as ExtractedContentItem[];
+
+      attempts++;
+      console.log(`[DOMInspector] Extraction attempt ${attempts}: ${items?.length || 0} items`);
+
+      // If we found items, we're done
+      if (items && items.length > 0) {
+        break;
+      }
+
+      // If no items and more attempts remaining, wait and retry
+      if (attempts < maxAttempts) {
+        console.log('[DOMInspector] No items found, retrying after wait...');
+        await this.page.waitForTimeout(300);
+      }
+    }
+
+    console.log('[DOMInspector] Final extracted items:', items?.length || 0);
     return {
       items: items || [],
       containerSelector: selector,
     };
+  }
+
+  // =========================================================================
+  // AUTO-DETECT PRODUCT CONTAINERS (ML-BASED)
+  // =========================================================================
+
+  /**
+   * Auto-detect product using ML-based multi-factor scoring.
+   * Returns element selector along with confidence score.
+   */
+  async autoDetectProduct(): Promise<ElementSelector | null> {
+    await this.inject();
+
+    // Check if this is a Zara page - use Zara-specific detection
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('zara.com')) {
+      return this.autoDetectZaraProduct();
+    }
+
+    console.log('[DOMInspector] Using ML-based product detection');
+
+    try {
+      // Use the ML-based ProductDetector
+      const result = await this.productDetector.detectProduct();
+
+      if (!result.selectedElement) {
+        console.log('[DOMInspector] No product detected:', result.reason);
+        return null;
+      }
+
+      const { selectedElement, confidence, fallbackRecommended, reason } = result;
+
+      console.log(`[DOMInspector] ML-detected product: ${selectedElement.selector}`);
+      console.log(`[DOMInspector] Confidence: ${(confidence * 100).toFixed(0)}%`);
+      console.log(`[DOMInspector] Generic selector: ${selectedElement.genericSelector}`);
+
+      if (fallbackRecommended) {
+        console.log(`[DOMInspector] Low confidence - ${reason}`);
+      }
+
+      // Don't highlight here - let the server's highlightSelected handle it
+      // to ensure only ONE highlight method is used
+
+      // Return in the expected ElementSelector format
+      return {
+        tagName: '', // Will be filled by browser
+        css: selectedElement.genericSelector,
+        cssSpecific: selectedElement.selector,
+        boundingBox: selectedElement.boundingBox,
+        text: '',
+        attributes: {},
+        // Include confidence info as extra properties
+        confidence,
+        fallbackRecommended,
+      } as ElementSelector & { confidence: number; fallbackRecommended: boolean };
+
+    } catch (error) {
+      console.error('[DOMInspector] ML auto-detect error:', error);
+      // Fall back to legacy detection on error
+      return this.legacyAutoDetectProduct();
+    }
+  }
+
+  /**
+   * Get detailed auto-detect result with all candidates for debugging
+   */
+  async autoDetectProductWithDetails(): Promise<DetectionResult> {
+    await this.inject();
+
+    // Check for Zara special case
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('zara.com')) {
+      const zaraResult = await this.autoDetectZaraProduct();
+      return {
+        selectedElement: zaraResult ? {
+          selector: zaraResult.css,
+          genericSelector: zaraResult.css,
+          boundingBox: zaraResult.boundingBox,
+        } : null,
+        confidence: zaraResult ? 0.9 : 0,
+        fallbackRecommended: !zaraResult,
+        reason: zaraResult ? undefined : 'Zara detection failed',
+        allCandidates: [],
+      };
+    }
+
+    return this.productDetector.detectProduct();
+  }
+
+  /**
+   * Legacy auto-detect (fallback for errors)
+   */
+  private async legacyAutoDetectProduct(): Promise<ElementSelector | null> {
+    console.log('[DOMInspector] Using legacy auto-detect fallback');
+
+    const detectScript = `
+      (function() {
+        var productPatterns = [
+          'article',
+          '[role="listitem"]',
+          '[itemtype*="Product"]',
+          '[data-product]',
+          '[data-item]',
+          '[data-sku]',
+          '[class*="product"]',
+          '[class*="item"]',
+          '[class*="card"]',
+        ];
+
+        function isLikelyProduct(el) {
+          if (!el || el.tagName === 'BODY' || el.tagName === 'HTML') return false;
+          var rect = el.getBoundingClientRect();
+          if (rect.width < 100 || rect.height < 100 || rect.width > window.innerWidth * 0.8) return false;
+          var productChildren = el.querySelectorAll('[class*="product"], [class*="item"], [class*="card"], article');
+          if (productChildren.length > 3) return false;
+          var hasImage = el.querySelector('img') !== null;
+          var hasPrice = /\\$|£|€|\\d+[.,]\\d{2}/i.test(el.textContent || '');
+          var hasLink = el.querySelector('a[href]') !== null;
+          return hasImage && (hasPrice || hasLink);
+        }
+
+        function addHighlight(el) {
+          el.setAttribute('data-scraper-detected', 'true');
+          el.style.cssText += '; outline: 4px solid #00cc66 !important; box-shadow: 0 0 20px rgba(0,204,102,0.5) !important;';
+        }
+
+        for (var i = 0; i < productPatterns.length; i++) {
+          try {
+            var elements = document.querySelectorAll(productPatterns[i]);
+            for (var j = 0; j < elements.length; j++) {
+              var el = elements[j];
+              if (isLikelyProduct(el)) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                addHighlight(el);
+                var tag = el.tagName.toLowerCase();
+                var css = tag;
+                if (['article', 'section', 'li'].indexOf(tag) !== -1) {
+                  css = tag;
+                } else if (el.classList.length > 0) {
+                  var cls = Array.from(el.classList).filter(function(c) { return !c.match(/^[0-9]/); })[0];
+                  if (cls) css = tag + '.' + CSS.escape(cls);
+                }
+                var rect = el.getBoundingClientRect();
+                return {
+                  tagName: tag,
+                  css: css,
+                  boundingBox: {
+                    x: rect.left + window.scrollX,
+                    y: rect.top + window.scrollY,
+                    width: rect.width,
+                    height: rect.height
+                  },
+                  text: '',
+                  attributes: {}
+                };
+              }
+            }
+          } catch (e) {}
+        }
+        return null;
+      })()
+    `;
+
+    try {
+      const result = await this.page.evaluate(detectScript) as ElementSelector | null;
+      if (result) {
+        console.log('[DOMInspector] Legacy detected:', result.css);
+      }
+      return result;
+    } catch (error) {
+      console.error('[DOMInspector] Legacy auto-detect error:', error);
+      return null;
+    }
+  }
+
+  // =========================================================================
+  // ZARA-SPECIFIC AUTO-DETECT
+  // =========================================================================
+
+  private async autoDetectZaraProduct(): Promise<ElementSelector | null> {
+    console.log('[DOMInspector] Using Zara-specific product detection');
+
+    // Zara has images and info in SEPARATE rows - we need to find BOTH and combine them
+    const zaraDetectScript = `
+      (function() {
+        // Find the first product image card
+        var imageCards = document.querySelectorAll('li.product-grid-product[data-productid]');
+        console.log('[Zara] Found image cards:', imageCards.length);
+
+        var firstImageCard = null;
+        var productId = null;
+
+        for (var i = 0; i < imageCards.length; i++) {
+          var card = imageCards[i];
+          var rect = card.getBoundingClientRect();
+          var hasImage = card.querySelector('img') !== null;
+
+          if (hasImage && rect.width >= 50 && rect.height >= 50) {
+            firstImageCard = card;
+            productId = card.getAttribute('data-productid');
+            console.log('[Zara] Found first visible image card, productId:', productId);
+            break;
+          }
+        }
+
+        if (!firstImageCard) {
+          console.log('[Zara] No image cards found');
+          return null;
+        }
+
+        // Now find the corresponding info card
+        // The info is in a separate row - look for li with product-grid-product-info
+        // that has a link pointing to the same product
+        var infoCards = document.querySelectorAll('.product-grid-product-info');
+        console.log('[Zara] Found info cards:', infoCards.length);
+
+        var matchingInfoCard = null;
+
+        // Try to find info card by position (same index in the grid)
+        var imageIndex = Array.from(imageCards).indexOf(firstImageCard);
+        var infoLis = document.querySelectorAll('li.product-grid-block-dynamic__product-info');
+
+        if (infoLis.length > imageIndex) {
+          matchingInfoCard = infoLis[imageIndex];
+          console.log('[Zara] Found matching info card by position index:', imageIndex);
+        }
+
+        // If we found both, create a combined bounding box
+        if (firstImageCard && matchingInfoCard) {
+          var imgRect = firstImageCard.getBoundingClientRect();
+          var infoRect = matchingInfoCard.getBoundingClientRect();
+
+          // Combined bounding box that covers both
+          var minX = Math.min(imgRect.left, infoRect.left);
+          var minY = Math.min(imgRect.top, infoRect.top);
+          var maxX = Math.max(imgRect.right, infoRect.right);
+          var maxY = Math.max(imgRect.bottom, infoRect.bottom);
+
+          console.log('[Zara] Creating combined bounding box for image + info');
+
+          // Scroll the image card into view only if not visible
+          if (imgRect.top < 0 || imgRect.bottom > window.innerHeight) {
+            firstImageCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+
+          // Return info with a combined selector that will match both
+          return {
+            tagName: 'li',
+            css: 'li.product-grid-product[data-productid]',
+            combinedCss: 'li.product-grid-product[data-productid], li.product-grid-block-dynamic__product-info',
+            boundingBox: {
+              x: minX + window.scrollX,
+              y: minY + window.scrollY,
+              width: maxX - minX,
+              height: maxY - minY
+            },
+            text: (firstImageCard.textContent || '').substring(0, 50) + ' | ' + (matchingInfoCard.textContent || '').substring(0, 50),
+            attributes: { productId: productId },
+            // Store both selectors for extraction
+            imageSelector: 'li.product-grid-product[data-productid]',
+            infoSelector: 'li.product-grid-block-dynamic__product-info'
+          };
+        }
+
+        // Fallback: just return the image card
+        console.log('[Zara] No matching info card found, returning image card only');
+        var rect = firstImageCard.getBoundingClientRect();
+        // Scroll only if not visible
+        if (rect.top < 0 || rect.bottom > window.innerHeight) {
+          firstImageCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        return {
+          tagName: 'li',
+          css: 'li.product-grid-product[data-productid]',
+          boundingBox: {
+            x: rect.left + window.scrollX,
+            y: rect.top + window.scrollY,
+            width: rect.width,
+            height: rect.height
+          },
+          text: (firstImageCard.textContent || '').substring(0, 100).trim(),
+          attributes: { productId: productId }
+        };
+      })()
+    `;
+
+    try {
+      interface ZaraResult extends ElementSelector {
+        combinedCss?: string;
+        imageSelector?: string;
+        infoSelector?: string;
+      }
+      const result = await this.page.evaluate(zaraDetectScript) as ZaraResult | null;
+      if (result) {
+        console.log('[DOMInspector] Zara auto-detected product:', result.css);
+        // If we have a combined selector (both image and info), highlight both
+        if (result.combinedCss && result.imageSelector && result.infoSelector) {
+          console.log('[DOMInspector] Highlighting combined selectors:', result.combinedCss);
+          await this.highlightMultipleSelectors(result.imageSelector, result.infoSelector);
+        } else if (result.css) {
+          await this.highlightSelected(result.css);
+        }
+      } else {
+        console.log('[DOMInspector] Zara auto-detect: no product found');
+      }
+      return result;
+    } catch (error) {
+      console.error('[DOMInspector] Zara auto-detect error:', error);
+      return null;
+    }
+  }
+
+  // Highlight multiple selectors (for Zara's split layout)
+  private async highlightMultipleSelectors(selector1: string, selector2: string): Promise<void> {
+    const script = `
+      (function(sel1, sel2) {
+        // Clear existing highlights
+        document.querySelectorAll('.__scraper_selected_highlight__').forEach(function(el) { el.remove(); });
+
+        function highlightElement(selector, index) {
+          var el = document.querySelector(selector);
+          if (!el) return;
+
+          var rect = el.getBoundingClientRect();
+          var highlight = document.createElement('div');
+          highlight.className = '__scraper_selected_highlight__';
+          highlight.setAttribute('data-index', String(index));
+          // Use absolute positioning with scroll offset so it stays with the element
+          highlight.style.cssText =
+            'position: absolute;' +
+            'top: ' + (rect.top + window.scrollY) + 'px;' +
+            'left: ' + (rect.left + window.scrollX) + 'px;' +
+            'width: ' + rect.width + 'px;' +
+            'height: ' + rect.height + 'px;' +
+            'border: 3px solid #00cc66;' +
+            'background: rgba(0, 204, 102, 0.15);' +
+            'pointer-events: none;' +
+            'z-index: 999999;' +
+            'box-sizing: border-box;';
+          document.body.appendChild(highlight);
+        }
+
+        highlightElement(sel1, 0);
+        highlightElement(sel2, 1);
+      })('${selector1.replace(/'/g, "\\'")}', '${selector2.replace(/'/g, "\\'")}')
+    `;
+    await this.page.evaluate(script);
   }
 }

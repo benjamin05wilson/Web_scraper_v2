@@ -81,6 +81,10 @@ interface UseBrowserSessionReturn {
   // Container extraction
   extractContainerContent: (selector: string) => void;
   extractedContent: ExtractedContentItem[];
+
+  // Auto-detect product
+  autoDetectProduct: () => void;
+  isAutoDetecting: boolean;
 }
 
 export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowserSessionReturn {
@@ -123,6 +127,12 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   // Container extraction state
   const [extractedContent, setExtractedContent] = useState<ExtractedContentItem[]>([]);
 
+  // Auto-detect state
+  const [isAutoDetecting, setIsAutoDetecting] = useState(false);
+
+  // Track if subscriptions are ready
+  const [subscriptionsReady, setSubscriptionsReady] = useState(false);
+
   // Subscribe to WebSocket messages
   useEffect(() => {
     const unsubscribes: (() => void)[] = [];
@@ -133,6 +143,17 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         setSessionId(msg.payload.sessionId);
         setCurrentUrl(msg.payload.url);
         setSessionStatus('ready');
+        // Reset all state for fresh session
+        setSelectedElement(null);
+        setSelectedElements([]);
+        setExtractedContent([]);
+        setHoveredElement(null);
+        setSelectionMode(false);
+        setDetectedPattern(null);
+        setAssignedSelectors([]);
+        setRecordedActions([]);
+        setScrapeResult(null);
+        setSelectorTestResult(null);
         console.log('[Session] Created:', msg.payload.sessionId);
       })
     );
@@ -239,7 +260,24 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       })
     );
 
+    // Auto-detect result
+    unsubscribes.push(
+      subscribe('dom:autoDetect', (msg) => {
+        setIsAutoDetecting(false);
+        if (msg.payload.success) {
+          console.log('[Session] Auto-detected product:', msg.payload.element?.css);
+        } else {
+          console.log('[Session] Auto-detect failed:', msg.payload.error);
+        }
+      })
+    );
+
+    // Mark subscriptions as ready
+    setSubscriptionsReady(true);
+    console.log('[Session] All subscriptions ready');
+
     return () => {
+      setSubscriptionsReady(false);
       unsubscribes.forEach((unsub) => unsub());
     };
   }, [subscribe]);
@@ -260,9 +298,18 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     send('session:destroy', {}, sessionId);
     setSessionId(null);
     setSessionStatus('disconnected');
+    // Clear all state from previous session
     setAssignedSelectors([]);
     setRecordedActions([]);
     setScrapeResult(null);
+    setSelectedElement(null);
+    setSelectedElements([]);
+    setExtractedContent([]);
+    setHoveredElement(null);
+    setSelectionMode(false);
+    setDetectedPattern(null);
+    setSelectorTestResult(null);
+    setCurrentUrl('');
   }, [sessionId, send]);
 
   // Navigate
@@ -416,11 +463,27 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   const extractContainerContent = useCallback(
     (selector: string) => {
       if (!sessionId) return;
+      if (!subscriptionsReady) {
+        console.warn('[Session] Subscriptions not ready, delaying extraction...');
+        // Retry after a short delay
+        setTimeout(() => {
+          setExtractedContent([]); // Clear previous
+          send('container:extract', { selector }, sessionId);
+        }, 200);
+        return;
+      }
       setExtractedContent([]); // Clear previous
       send('container:extract', { selector }, sessionId);
     },
-    [sessionId, send]
+    [sessionId, send, subscriptionsReady]
   );
+
+  // Auto-detect first product on the page
+  const autoDetectProduct = useCallback(() => {
+    if (!sessionId) return;
+    setIsAutoDetecting(true);
+    send('dom:autoDetect', {}, sessionId);
+  }, [sessionId, send]);
 
   return {
     sessionId,
@@ -470,5 +533,8 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
 
     extractContainerContent,
     extractedContent,
+
+    autoDetectProduct,
+    isAutoDetecting,
   };
 }
