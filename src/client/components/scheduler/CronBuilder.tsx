@@ -1,4 +1,3 @@
-import React from 'react';
 import type { CronFields } from '../../utils/cronUtils';
 import { CRON_PRESETS, parseCronExpression, buildCronExpression, cronToHuman } from '../../utils/cronUtils';
 

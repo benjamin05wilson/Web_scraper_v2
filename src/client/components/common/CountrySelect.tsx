@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { COUNTRIES, searchCountries } from '../../utils/countries';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { searchCountries } from '../../utils/countries';
 
 interface CountrySelectProps {
   value: string;

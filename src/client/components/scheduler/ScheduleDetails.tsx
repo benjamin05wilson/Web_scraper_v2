@@ -1,4 +1,3 @@
-import React from 'react';
 import type { Schedule } from '../../../shared/types';
 import { cronToHuman } from '../../utils/cronUtils';
 import { formatDateTime } from '../../utils/dateUtils';

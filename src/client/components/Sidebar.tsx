@@ -91,8 +91,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   assignedSelectors,
   assignSelector,
   removeSelector,
-  testSelector,
-  selectorTestResult,
+  testSelector: _testSelector,
+  selectorTestResult: _selectorTestResult,
   isRecording,
   recordedActions,
   startRecording,
@@ -120,7 +120,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     recorder: true,
     results: true,
   });
-  const [testSelectorInput, setTestSelectorInput] = useState('');
+  const [_testSelectorInput, _setTestSelectorInput] = useState('');
   const [internalContainerSelector, setInternalContainerSelector] = useState('');
   const [maxPages, setMaxPages] = useState(1);
 
@@ -170,15 +170,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
     setWizardStep('labeling');
   }, [selectedElement, extractContainerContent]);
-
-  // Get count of items with a specific role (for fallback numbering)
-  const getRoleCount = useCallback((role: SelectorRole) => {
-    let count = 0;
-    for (const [, item] of labeledItems) {
-      if (item.role === role) count++;
-    }
-    return count;
-  }, [labeledItems]);
 
   // Label an extracted item - allows multiple items per role as fallbacks
   const labelItem = useCallback((itemValue: string, role: SelectorRole | null) => {
@@ -265,13 +256,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
     [getAssignedAll]
   );
 
-  // Test selector
-  const handleTestSelector = useCallback(() => {
-    if (testSelectorInput.trim()) {
-      testSelector(testSelectorInput.trim());
-    }
-  }, [testSelectorInput, testSelector]);
-
   // Build and execute scraper config
   const handleExecuteScrape = useCallback(() => {
     const nextPageSelector = getAssigned('nextPage');
@@ -311,19 +295,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
     setScraperConfig,
     executeScrape,
   ]);
-
-  // Format relative time for last saved
-  const getRelativeTime = (timestamp: number | null | undefined) => {
-    if (!timestamp) return null;
-    const now = Date.now();
-    const diff = now - timestamp;
-    const minutes = Math.floor(diff / 60000);
-    if (minutes < 1) return 'just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    return `${Math.floor(hours / 24)}d ago`;
-  };
 
   return (
     <div className="sidebar">

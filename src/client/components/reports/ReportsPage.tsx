@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { useProducts } from '../../hooks/useProducts';
 import { StatsCards } from './StatsCards';
 import { ReportsToolbar } from './ReportsToolbar';
@@ -7,22 +7,20 @@ import { DomainSummary } from './DomainSummary';
 import { ProductDetailModal } from './ProductDetailModal';
 import { ClearDataModal } from './ClearDataModal';
 import type { Product, ProductFilters } from '../../../shared/types';
-import { getDateRange } from '../../utils/dateUtils';
 
 export function ReportsPage() {
   const {
     products,
     stats,
     loading,
-    error,
     filters,
     setFilters,
     pagination,
     setPage,
     loadProducts,
     loadStats,
-    clearProducts,
-    exportProducts,
+    clearData,
+    exportCSV,
   } = useProducts();
 
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -40,23 +38,19 @@ export function ReportsPage() {
   }, [loadStats, loadProducts]);
 
   const handleExport = useCallback(() => {
-    const { start_date, end_date } = getDateRange(filters.dateRange || 'week');
-    exportProducts({
-      ...filters,
-      start_date: start_date?.toISOString() || undefined,
-      end_date: end_date?.toISOString() || undefined,
-    });
-  }, [exportProducts, filters]);
+    // Export currently loaded products to CSV
+    exportCSV();
+  }, [exportCSV]);
 
   const handleViewDetails = useCallback((product: Product) => {
     setSelectedProduct(product);
     setIsDetailModalOpen(true);
   }, []);
 
-  const handleClearData = useCallback(async (country: string | null, beforeDate: string | null) => {
-    await clearProducts(country || undefined, beforeDate ? new Date(beforeDate).toISOString() : undefined);
+  const handleClearData = useCallback(async (country: string | null, _beforeDate: string | null) => {
+    await clearData({ country: country || undefined });
     handleRefresh();
-  }, [clearProducts, handleRefresh]);
+  }, [clearData, handleRefresh]);
 
   return (
     <>

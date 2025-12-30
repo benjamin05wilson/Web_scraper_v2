@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, useRef, ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 import type {
   BatchJob,
@@ -165,7 +165,7 @@ export function BatchProvider({ children }: BatchProviderProps) {
   }, []);
 
   // Check which domain+country pairs have configs
-  const checkConfigs = async (domainCountryPairs: string[], jobs: BatchJob[]) => {
+  const checkConfigs = async (domainCountryPairs: string[], _jobs: BatchJob[]) => {
     try {
       // Try to load configs from both BigQuery and local sources
       const configMap = new Map<string, Config>();
@@ -229,7 +229,7 @@ export function BatchProvider({ children }: BatchProviderProps) {
 
       // Find missing configs - check domain:country first, then fall back to domain only
       const missing = domainCountryPairs.filter(pair => {
-        const [domain, country] = pair.split(':');
+        const [domain, _country] = pair.split(':');
         // Check exact domain:country match first
         if (configMap.has(pair)) {
           console.log(`[BatchContext] "${pair}" -> exact match found`);

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { useSchedules } from '../../hooks/useSchedules';
 import { SchedulesList } from './SchedulesList';
 import { ScheduleDetails } from './ScheduleDetails';
@@ -11,7 +11,6 @@ export function SchedulerPage() {
     schedules,
     selectedSchedule,
     loading,
-    error,
     loadSchedules,
     selectSchedule,
     createSchedule,
@@ -25,7 +24,6 @@ export function SchedulerPage() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
-  const [runningId, setRunningId] = useState<number | null>(null);
 
   const filteredSchedules = useMemo(() => {
     if (!searchQuery) return schedules;
@@ -33,7 +31,7 @@ export function SchedulerPage() {
   }, [schedules, searchQuery, searchSchedules]);
 
   const handleRefresh = () => {
-    loadSchedules(true);
+    loadSchedules();
   };
 
   const handleToggle = async (id: number, enabled: boolean) => {
@@ -42,12 +40,7 @@ export function SchedulerPage() {
 
   const handleRunNow = async () => {
     if (!selectedSchedule) return;
-    setRunningId(selectedSchedule.id);
-    try {
-      await runNow(selectedSchedule.id);
-    } finally {
-      setRunningId(null);
-    }
+    await runNow(selectedSchedule.id);
   };
 
   const handleCreateSchedule = async (data: Omit<Schedule, 'id' | 'created_at' | 'last_run'>) => {

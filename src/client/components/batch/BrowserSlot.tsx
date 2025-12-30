@@ -1,4 +1,3 @@
-import React from 'react';
 import type { BrowserSlot as BrowserSlotType } from '../../../shared/types';
 
 interface BrowserSlotProps {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Modal } from '../common/Modal';
 import type { Config } from '../../../shared/types';
 
@@ -63,7 +63,7 @@ export function EditConfigModal({
 
       if (formData.paginationType !== 'none') {
         updates.pagination = {
-          type: formData.paginationType as Config['pagination']['type'],
+          type: formData.paginationType as 'infinite_scroll' | 'url_pattern' | 'next_page',
           pattern: formData.paginationPattern || undefined,
           selector: formData.paginationSelector || undefined,
           max_pages: formData.maxPages,

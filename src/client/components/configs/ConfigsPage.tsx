@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useConfigs } from '../../hooks/useConfigs';
 import { ConfigsList } from './ConfigsList';
 import { ConfigDetails } from './ConfigDetails';
@@ -11,7 +11,6 @@ export function ConfigsPage() {
     configs,
     selectedConfig,
     loading,
-    error,
     loadConfigs,
     selectConfig,
     updateConfig,

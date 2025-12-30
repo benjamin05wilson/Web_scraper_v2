@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import { useRef, useCallback } from 'react';
 import { Modal } from '../common/Modal';
 import type { BrowserSlot } from '../../../shared/types';
 

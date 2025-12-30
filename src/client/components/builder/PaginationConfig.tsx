@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 
 interface PaginationPattern {
   type: 'url_pattern' | 'next_page' | 'infinite_scroll';

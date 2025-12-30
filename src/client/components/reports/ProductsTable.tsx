@@ -1,4 +1,3 @@
-import React from 'react';
 import type { Product } from '../../../shared/types';
 import { formatDateTime } from '../../utils/dateUtils';
 import { formatPrice } from '../../utils/priceUtils';

@@ -1,4 +1,3 @@
-import React from 'react';
 import type { BatchJob, BatchProgress } from '../../../shared/types';
 
 interface JobQueueProps {
@@ -42,7 +41,6 @@ export function JobQueue({
 }: JobQueueProps) {
   const completedPercent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
   const hasResults = progress.completed > 0;
-  const canStart = jobs.length > 0 && missingConfigsCount === 0;
 
   return (
     <div className="card">

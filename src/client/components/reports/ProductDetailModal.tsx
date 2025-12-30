@@ -1,4 +1,3 @@
-import React from 'react';
 import { Modal } from '../common/Modal';
 import type { Product } from '../../../shared/types';
 import { formatDateTime } from '../../utils/dateUtils';
@@ -39,7 +38,7 @@ export function ProductDetailModal({ isOpen, onClose, product }: ProductDetailMo
       <div className="detail-grid">
         <DetailRow label="Product Name" value={product.item_name} />
         <DetailRow label="Brand" value={product.brand} />
-        <DetailRow label="Price" value={formatPrice(product.price, product.currency)} />
+        <DetailRow label="Price" value={product.price != null ? formatPrice(product.price, product.currency) : undefined} />
         <DetailRow label="Original Price" value={product.price_raw} />
         <DetailRow label="Domain" value={product.domain} />
         <DetailRow label="Category" value={product.category} />

@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, FormEvent } from 'react';
 import { Modal } from '../common/Modal';
 import { ConfigSelect } from '../common/ConfigSelect';
 import { CronBuilder } from './CronBuilder';
 import { CRON_PRESETS } from '../../utils/cronUtils';
-import type { Schedule } from '../../../shared/types';
+import type { Schedule, Config } from '../../../shared/types';
 
 interface CreateScheduleModalProps {
   isOpen: boolean;
@@ -16,10 +16,13 @@ export function CreateScheduleModal({ isOpen, onClose, onSave }: CreateScheduleM
   const [type, setType] = useState<'scraper' | 'batch'>('scraper');
   const [config, setConfig] = useState('');
   const [csvPath, setCsvPath] = useState('');
-  const [cron, setCron] = useState(CRON_PRESETS.daily);
+  const [cron, setCron] = useState<string>(CRON_PRESETS.daily);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [configs, setConfigs] = useState<Config[]>([]);
+  const [loadingConfigs, setLoadingConfigs] = useState(false);
 
+  // Load configs when modal opens
   useEffect(() => {
     if (isOpen) {
       setName('');
@@ -28,10 +31,18 @@ export function CreateScheduleModal({ isOpen, onClose, onSave }: CreateScheduleM
       setCsvPath('');
       setCron(CRON_PRESETS.daily);
       setError(null);
+
+      // Fetch available configs
+      setLoadingConfigs(true);
+      fetch('http://localhost:3002/configs')
+        .then(res => res.json())
+        .then(data => setConfigs(data.configs || []))
+        .catch(() => setConfigs([]))
+        .finally(() => setLoadingConfigs(false));
     }
   }, [isOpen]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -163,9 +174,11 @@ export function CreateScheduleModal({ isOpen, onClose, onSave }: CreateScheduleM
           <div className="form-group">
             <label className="form-label">Configuration</label>
             <ConfigSelect
+              configs={configs}
               value={config}
               onChange={setConfig}
               placeholder="Select a config..."
+              loading={loadingConfigs}
             />
           </div>
         )}

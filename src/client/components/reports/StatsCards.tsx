@@ -1,4 +1,3 @@
-import React from 'react';
 import type { ProductStats } from '../../../shared/types';
 
 interface StatsCardsProps {

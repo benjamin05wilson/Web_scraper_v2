@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
 import type {
   Product,
   ProductStats,
@@ -143,7 +143,7 @@ export function ReportsProvider({ children }: ReportsProviderProps) {
       'scraped_at',
     ];
 
-    const csvContent = generateCSV(products, headers);
+    const csvContent = generateCSV(products as unknown as Record<string, unknown>[], headers);
     const filename = `products_export_${new Date().toISOString().split('T')[0]}.csv`;
     downloadCSV(csvContent, filename);
   }, [products]);

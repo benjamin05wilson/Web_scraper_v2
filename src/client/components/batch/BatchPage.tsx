@@ -1,4 +1,4 @@
-import React, { useMemo, useCallback } from 'react';
+import { useMemo, useCallback } from 'react';
 import { useBatchContext } from '../../context/BatchContext';
 import { BatchUploader } from './BatchUploader';
 import { DomainConfigChecker } from './DomainConfigChecker';

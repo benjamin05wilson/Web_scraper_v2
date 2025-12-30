@@ -456,6 +456,7 @@ export type NextScrapeStatus = 'pending' | 'running' | 'completed' | 'error';
 // ============================================================================
 
 export interface Product {
+  id?: number;
   item_name: string;
   brand?: string;
   price?: number;

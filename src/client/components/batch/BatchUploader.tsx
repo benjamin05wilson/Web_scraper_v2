@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import { useRef } from 'react';
 import { downloadCSV, BATCH_CSV_TEMPLATE } from '../../utils/csvUtils';
 
 interface BatchUploaderProps {
@@ -17,8 +17,8 @@ export function BatchUploader({ onFileUpload, disabled }: BatchUploaderProps) {
   };
 
   const handleDownloadTemplate = () => {
-    const templateData = [BATCH_CSV_TEMPLATE];
-    downloadCSV(templateData, 'batch_template.csv');
+    // BATCH_CSV_TEMPLATE is already a CSV string
+    downloadCSV(BATCH_CSV_TEMPLATE, 'batch_template.csv');
   };
 
   return (

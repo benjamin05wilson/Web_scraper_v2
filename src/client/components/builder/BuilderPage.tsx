@@ -12,6 +12,12 @@ import { CountrySelect } from '../common/CountrySelect';
 import { StatusIndicator } from '../common/StatusIndicator';
 
 type FieldType = 'Title' | 'Price' | 'URL' | 'NextPage' | 'Image';
+type LabelerFieldType = FieldType | 'Skip';
+
+interface LabeledItem {
+  field: LabelerFieldType;
+  item: ExtractedItem;
+}
 
 interface SelectedItem {
   text?: string;
@@ -123,8 +129,8 @@ export function BuilderPage() {
   // Read URL query params (from batch page "Build" button)
   const [searchParams] = useSearchParams();
 
-  // Activity log
-  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  // Activity log (logEntries used by setLogEntries, kept for future activity display)
+  const [, setLogEntries] = useState<LogEntry[]>([]);
 
   // Price format modal
   const [priceModalOpen, setPriceModalOpen] = useState(false);
@@ -184,7 +190,7 @@ export function BuilderPage() {
   // Listen for extracted content from session
   // Max items threshold - if more than this, likely selected the grid not a single product
   // Increased from 15 to 30 to accommodate modern sites with complex product cards
-  const MAX_EXTRACTED_ITEMS = 30;
+  const MAX_EXTRACTED_ITEMS = 50;
 
   useEffect(() => {
     // Process when extractedContent changes and has items
@@ -394,8 +400,11 @@ export function BuilderPage() {
 
   // Handle labels from the ExtractedContentLabeler
   const handleSaveLabels = useCallback(
-    (labels: { field: FieldType; item: ExtractedItem }[], container: string) => {
-      labels.forEach(({ field, item }) => {
+    (labels: LabeledItem[], _container: string) => {
+      // Filter out 'Skip' items and process the rest
+      const validLabels = labels.filter((l): l is LabeledItem & { field: FieldType } => l.field !== 'Skip');
+
+      validLabels.forEach(({ field, item }) => {
         const selectedItem: SelectedItem = {
           text: item.type === 'text' ? item.value : undefined,
           href: item.type === 'link' ? item.value : undefined,
@@ -415,7 +424,7 @@ export function BuilderPage() {
       setShowLabeler(false);
       setExtractedItems([]);
       lastExtractedSelectorRef.current = '';
-      addLog(`Applied ${labels.length} labels from container`);
+      addLog(`Applied ${validLabels.length} labels from container`);
     },
     [addLog]
   );
@@ -535,7 +544,7 @@ export function BuilderPage() {
             // Extract the CSS selector from each item
             const cssSelectors = items
               .map((item: SelectedItem) => item.selector)
-              .filter((s): s is string => !!s);
+              .filter((s: string | undefined): s is string => !!s);
 
             if (cssSelectors.length > 0) {
               selectors[field] = cssSelectors;

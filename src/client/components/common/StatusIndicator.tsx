@@ -1,4 +1,3 @@
-import React from 'react';
 
 type StatusType = 'idle' | 'active' | 'success' | 'loading' | 'warning' | 'error' | 'running' | 'danger';
 
