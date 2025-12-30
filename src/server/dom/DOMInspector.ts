@@ -1399,7 +1399,7 @@ export class DOMInspector {
 
           // SPECIAL HANDLING: Look for split prices (currency symbol in one element, number in adjacent element)
           // Common pattern: <span>$</span><span>99.99</span> or similar
-          // Also handles price ranges like "$59.95 - $379.95"
+          // Also handles price ranges like "$59.95 - $379.95" and multiple prices like "$69.95 $34.98"
           var priceContainers = container.querySelectorAll('[class*="price"], [class*="Price"], [class*="cost"], [class*="Cost"], [class*="amount"], [class*="Amount"]');
           for (var p = 0; p < priceContainers.length; p++) {
             var priceEl = priceContainers[p];
@@ -1419,18 +1419,22 @@ export class DOMInspector {
                 isPrice: true
               });
             } else {
-              // Try single price pattern
-              var priceMatch = fullPriceText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
-              if (priceMatch) {
-                var fullPrice = priceMatch[0];
-                addItem({
-                  type: 'text',
-                  value: fullPrice,
-                  selector: getRelativeSelector(priceEl, container),
-                  displayText: fullPrice,
-                  tagName: priceEl.tagName.toLowerCase(),
-                  isPrice: true
-                });
+              // Find ALL prices in the element (handles "$69.95 $34.98" original+sale pattern)
+              var priceRegex = /[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/g;
+              var allPriceMatches = fullPriceText.match(priceRegex);
+              if (allPriceMatches && allPriceMatches.length > 0) {
+                // Add each price found
+                for (var pm = 0; pm < allPriceMatches.length; pm++) {
+                  var foundPrice = allPriceMatches[pm].trim();
+                  addItem({
+                    type: 'text',
+                    value: foundPrice,
+                    selector: getRelativeSelector(priceEl, container),
+                    displayText: foundPrice,
+                    tagName: priceEl.tagName.toLowerCase(),
+                    isPrice: true
+                  });
+                }
               }
             }
           }
@@ -1458,16 +1462,20 @@ export class DOMInspector {
                     isPrice: true
                   });
                 } else {
-                  var parentPriceMatch = parentText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
-                  if (parentPriceMatch) {
-                    addItem({
-                      type: 'text',
-                      value: parentPriceMatch[0],
-                      selector: getRelativeSelector(priceParent, container),
-                      displayText: parentPriceMatch[0],
-                      tagName: priceParent.tagName.toLowerCase(),
-                      isPrice: true
-                    });
+                  // Find ALL prices in parent (handles multiple prices like "$69.95 $34.98")
+                  var parentPriceRegex = /[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/g;
+                  var parentPriceMatches = parentText.match(parentPriceRegex);
+                  if (parentPriceMatches && parentPriceMatches.length > 0) {
+                    for (var ppm = 0; ppm < parentPriceMatches.length; ppm++) {
+                      addItem({
+                        type: 'text',
+                        value: parentPriceMatches[ppm].trim(),
+                        selector: getRelativeSelector(priceParent, container),
+                        displayText: parentPriceMatches[ppm].trim(),
+                        tagName: priceParent.tagName.toLowerCase(),
+                        isPrice: true
+                      });
+                    }
                   }
                 }
               }
@@ -1493,7 +1501,7 @@ export class DOMInspector {
             if (hasBlockChildren) continue;
 
             var elPriceText = priceEl.textContent ? priceEl.textContent.trim().replace(/\\s+/g, ' ') : '';
-            // Check for price range pattern
+            // Check for price range pattern first
             var elPriceRangeMatch = elPriceText.match(/[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?\\s*[-–—]\\s*[£$€¥₹]?\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/);
             if (elPriceRangeMatch) {
               var foundRange = elPriceRangeMatch[0].replace(/\\s+/g, ' ').trim();
@@ -1505,6 +1513,22 @@ export class DOMInspector {
                 tagName: priceEl.tagName.toLowerCase(),
                 isPrice: true
               });
+            } else {
+              // Find ALL individual prices (handles "$69.95 $34.98" pattern)
+              var elPriceRegex = /[£$€¥₹]\\s*\\d+([,.]\\d{1,3})*([,.]\\d{1,2})?/g;
+              var elPriceMatches = elPriceText.match(elPriceRegex);
+              if (elPriceMatches && elPriceMatches.length > 0) {
+                for (var epm = 0; epm < elPriceMatches.length; epm++) {
+                  addItem({
+                    type: 'text',
+                    value: elPriceMatches[epm].trim(),
+                    selector: getRelativeSelector(priceEl, container),
+                    displayText: elPriceMatches[epm].trim(),
+                    tagName: priceEl.tagName.toLowerCase(),
+                    isPrice: true
+                  });
+                }
+              }
             }
           }
 
