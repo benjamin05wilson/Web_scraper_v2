@@ -2,7 +2,7 @@
 // EXCEL EXPORT UTILITY
 // ============================================================================
 
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import type { ScrapedItem } from '../../../shared/types';
 
 interface ExcelExportOptions {

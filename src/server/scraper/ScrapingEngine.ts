@@ -75,7 +75,7 @@ export class ScrapingEngine {
       // Auto-scroll to load lazy content if enabled
       if (config.autoScroll !== false) {
         console.log('[ScrapingEngine] Auto-scrolling to load lazy content...');
-        await this.autoScrollToLoadContent(config.selectors);
+        await this.autoScrollToLoadContent(config.selectors, targetProducts);
       }
 
       // Scrape pages
@@ -1306,7 +1306,8 @@ export class ScrapingEngine {
       })();
     `);
 
-    console.log(`[ScrapingEngine] Force-loaded images: ${result.result?.value || 0}`);
+    const resultValue = (result as { result?: { value?: number } }).result?.value || 0;
+    console.log(`[ScrapingEngine] Force-loaded images: ${resultValue}`);
   }
 
   // Force trigger lazy loading by simulating scroll events
@@ -1325,7 +1326,7 @@ export class ScrapingEngine {
     });
   }
 
-  private async autoScrollToLoadContent(selectors: AssignedSelector[]): Promise<void> {
+  private async autoScrollToLoadContent(selectors: AssignedSelector[], targetProducts: number = 0): Promise<void> {
     const scrollDelay = 800; // Ms between scroll steps
     const slowScrollDelay = 1000; // Ms for slow scroll-up
     const scrollStepSize = 300; // Pixels per scroll step
@@ -1334,6 +1335,9 @@ export class ScrapingEngine {
     const noChangeThreshold = 3; // How many times at bottom with no change before giving up
 
     console.log('[ScrapingEngine] Auto-scroll: starting lazy load detection...');
+    if (targetProducts > 0) {
+      console.log(`[ScrapingEngine] Auto-scroll: will stop at ${targetProducts} products`);
+    }
 
     // First, try to disable lazy loading mechanisms
     await this.disableLazyLoading();
@@ -1374,9 +1378,14 @@ export class ScrapingEngine {
 
     let iteration = 0;
     let noChangeAtBottomCount = 0;
-    let scrollDownLoadedContent = false;
 
     while (iteration < maxIterations && noChangeAtBottomCount < noChangeThreshold) {
+      // Check if we've reached target products BEFORE scrolling more
+      if (targetProducts > 0 && totalElementCount >= targetProducts) {
+        console.log(`[ScrapingEngine] Reached target of ${targetProducts} products, stopping scroll`);
+        break;
+      }
+
       iteration++;
       const beforeCount = totalElementCount;
       const beforeHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
@@ -1397,7 +1406,12 @@ export class ScrapingEngine {
         console.log(`[ScrapingEngine] Loaded ${afterCount - beforeCount} new elements (total: ${afterCount})`);
         totalElementCount = afterCount;
         noChangeAtBottomCount = 0; // Reset counter since we found new content
-        scrollDownLoadedContent = true;
+
+        // Check if we hit target after loading new content
+        if (targetProducts > 0 && totalElementCount >= targetProducts) {
+          console.log(`[ScrapingEngine] Reached target of ${targetProducts} products, stopping scroll`);
+          break;
+        }
       } else if (afterHeight > beforeHeight) {
         // Page expanded but no new elements yet - keep going
         console.log(`[ScrapingEngine] Page expanded: ${beforeHeight}px -> ${afterHeight}px`);
@@ -1422,6 +1436,11 @@ export class ScrapingEngine {
     // Many sites only load content when scrolling up from the bottom
     // But if Strategy 1 worked well, we bail out early if scroll-up finds nothing
     // =========================================================================
+
+    // Skip Strategy 2 if we already hit target in Strategy 1
+    if (targetProducts > 0 && totalElementCount >= targetProducts) {
+      console.log(`[ScrapingEngine] Already at target ${targetProducts}, skipping Strategy 2`);
+    } else {
     const earlyBailIterations = 5; // If no new content after this many iterations, stop
     console.log('[ScrapingEngine] Strategy 2: Trying scroll-up to find more content...');
     {
@@ -1432,6 +1451,12 @@ export class ScrapingEngine {
       let iterationsWithoutNewContent = 0;
 
       while (iteration < maxIterations && noChangeAtBottomCount < noChangeThreshold) {
+        // Check if we've reached target products
+        if (targetProducts > 0 && totalElementCount >= targetProducts) {
+          console.log(`[ScrapingEngine] Reached target of ${targetProducts} products, stopping scroll-up`);
+          break;
+        }
+
         iteration++;
         const beforeCount = totalElementCount;
         const metrics = await getPageMetrics();
@@ -1484,6 +1509,12 @@ export class ScrapingEngine {
           scrollUpLoadedContent = true;
           iterationsWithoutNewContent = 0; // Reset early bail counter
 
+          // Check if we hit target after loading new content
+          if (targetProducts > 0 && totalElementCount >= targetProducts) {
+            console.log(`[ScrapingEngine] Reached target of ${targetProducts} products, stopping scroll-up`);
+            break;
+          }
+
           // Immediately go back to bottom when we find new content
           console.log('[ScrapingEngine] New content found, going back to bottom...');
           await this.page.evaluate(() => {
@@ -1502,6 +1533,7 @@ export class ScrapingEngine {
 
       console.log(`[ScrapingEngine] Strategy 2 complete: ${totalElementCount} elements (${totalElementCount - afterStrategy1Count} new from scroll-up)`);
     }
+    } // end else (skip if already at target)
 
     // Final wait for any remaining loading
     await this.waitForLoadingToComplete(loadingWaitTimeout);

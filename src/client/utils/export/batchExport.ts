@@ -3,7 +3,7 @@
 // ============================================================================
 
 import JSZip from 'jszip';
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import type { BatchJob } from '../../../shared/types';
 
 // Result types for batch export
@@ -278,7 +278,21 @@ export function generatePricingAnalysis(
   return analysis;
 }
 
-// Create Excel workbook for pricing analysis
+// Cell style interface for xlsx-js-style compatibility
+interface CellStyle {
+  font?: { bold?: boolean; sz?: number; color?: { rgb: string } };
+  fill?: { fgColor?: { rgb: string } };
+  border?: {
+    top?: { style: string; color: { rgb: string } };
+    bottom?: { style: string; color: { rgb: string } };
+    left?: { style: string; color: { rgb: string } };
+    right?: { style: string; color: { rgb: string } };
+  };
+  alignment?: { horizontal?: string; vertical?: string };
+  numFmt?: string;
+}
+
+// Create Excel workbook for pricing analysis with proper tables and formatting
 export function createPricingAnalysisExcel(analysis: PricingAnalysis): XLSX.WorkBook | null {
   // Get all unique domains across all categories
   const allDomains = new Set<string>();
@@ -294,6 +308,47 @@ export function createPricingAnalysisExcel(analysis: PricingAnalysis): XLSX.Work
 
   // Create workbook
   const wb = XLSX.utils.book_new();
+
+  // Common styles for table formatting
+  const borderStyle = {
+    top: { style: 'thin', color: { rgb: '000000' } },
+    bottom: { style: 'thin', color: { rgb: '000000' } },
+    left: { style: 'thin', color: { rgb: '000000' } },
+    right: { style: 'thin', color: { rgb: '000000' } },
+  };
+
+  const titleStyle: CellStyle = {
+    font: { bold: true, sz: 14, color: { rgb: 'FFFFFF' } },
+    fill: { fgColor: { rgb: '4472C4' } },
+    border: borderStyle,
+    alignment: { horizontal: 'left', vertical: 'center' },
+  };
+
+  const headerStyle: CellStyle = {
+    font: { bold: true, sz: 11 },
+    fill: { fgColor: { rgb: 'D9E2F3' } },
+    border: borderStyle,
+    alignment: { horizontal: 'center', vertical: 'center' },
+  };
+
+  const subHeaderStyle: CellStyle = {
+    font: { bold: true, sz: 10 },
+    fill: { fgColor: { rgb: 'E9EDF4' } },
+    border: borderStyle,
+    alignment: { horizontal: 'center', vertical: 'center' },
+  };
+
+  const dataStyle: CellStyle = {
+    border: borderStyle,
+    alignment: { horizontal: 'right', vertical: 'center' },
+    numFmt: '0.00',
+  };
+
+  const categoryStyle: CellStyle = {
+    font: { bold: true },
+    border: borderStyle,
+    alignment: { horizontal: 'left', vertical: 'center' },
+  };
 
   // Build ALL data for single sheet
   const allData: (string | number)[][] = [];
@@ -521,6 +576,47 @@ export function createPricingAnalysisExcel(analysis: PricingAnalysis): XLSX.Work
 
   // Apply merges
   ws['!merges'] = merges;
+
+  // Apply styles to all cells
+  const sectionStarts: number[] = [];
+
+  // Find section title rows
+  allData.forEach((row, idx) => {
+    if (row[0] === 'AVERAGES' || row[0] === 'DIFFERENCES AS %' || row[0] === 'COMPETITOR COMPARISON') {
+      sectionStarts.push(idx);
+    }
+  });
+
+  // Apply styles row by row
+  for (let r = 0; r < allData.length; r++) {
+    const isSectionTitle = sectionStarts.includes(r);
+    const isSectionHeader1 = sectionStarts.some((s) => r === s + 1);
+    const isSectionHeader2 = sectionStarts.some((s) => r === s + 2);
+    const isEmptyRow = allData[r].length === 0 || (allData[r].length === 1 && allData[r][0] === '');
+    const isDataRow = !isSectionTitle && !isSectionHeader1 && !isSectionHeader2 && !isEmptyRow;
+
+    for (let c = 0; c < maxCols; c++) {
+      const cellRef = XLSX.utils.encode_cell({ r, c });
+      if (!ws[cellRef]) {
+        ws[cellRef] = { v: '', t: 's' };
+      }
+
+      // Apply appropriate style based on row type
+      if (isSectionTitle && c === 0) {
+        (ws[cellRef] as { s?: CellStyle }).s = titleStyle;
+      } else if (isSectionHeader1) {
+        (ws[cellRef] as { s?: CellStyle }).s = headerStyle;
+      } else if (isSectionHeader2) {
+        (ws[cellRef] as { s?: CellStyle }).s = subHeaderStyle;
+      } else if (isDataRow) {
+        if (c <= 1) {
+          (ws[cellRef] as { s?: CellStyle }).s = categoryStyle;
+        } else {
+          (ws[cellRef] as { s?: CellStyle }).s = dataStyle;
+        }
+      }
+    }
+  }
 
   XLSX.utils.book_append_sheet(wb, ws, 'Pricing Analysis');
 
