@@ -1374,7 +1374,7 @@ export class ScrapingEngine {
     // STRATEGY 1: Jump to bottom repeatedly until nothing loads
     // Works for most sites (Zara, Amazon, typical infinite scroll)
     // =========================================================================
-    console.log('[ScrapingEngine] Strategy 1: Scroll to bottom to load content...');
+    console.log(`[ScrapingEngine] Strategy 1: Scroll to bottom to load content${targetProducts > 0 ? ` (target: ${targetProducts} products)` : ''}...`);
 
     let iteration = 0;
     let noChangeAtBottomCount = 0;
@@ -1439,10 +1439,10 @@ export class ScrapingEngine {
 
     // Skip Strategy 2 if we already hit target in Strategy 1
     if (targetProducts > 0 && totalElementCount >= targetProducts) {
-      console.log(`[ScrapingEngine] Already at target ${targetProducts}, skipping Strategy 2`);
+      console.log(`[ScrapingEngine] Strategy 2: SKIPPED - Already have ${totalElementCount} products (target: ${targetProducts})`);
     } else {
     const earlyBailIterations = 5; // If no new content after this many iterations, stop
-    console.log('[ScrapingEngine] Strategy 2: Trying scroll-up to find more content...');
+    console.log(`[ScrapingEngine] Strategy 2: Trying scroll-up to find more content (current: ${totalElementCount}${targetProducts > 0 ? `, target: ${targetProducts}` : ''})...`);
     {
       // We're already at bottom from Strategy 1, now slowly scroll up
       iteration = 0;
@@ -1547,7 +1547,7 @@ export class ScrapingEngine {
     });
     await new Promise((r) => setTimeout(r, 300));
 
-    console.log(`[ScrapingEngine] Auto-scroll complete: ${totalElementCount} total elements (${totalElementCount - initialCount} loaded via scroll)`);
+    console.log(`[ScrapingEngine] Auto-scroll complete: ${totalElementCount} total elements (${totalElementCount - initialCount} loaded via scroll)${targetProducts > 0 ? ` | Target: ${targetProducts}` : ''}`);
   }
 
   // Wait for loading indicators to disappear

@@ -43,11 +43,15 @@ export const CHROME_FLAGS_WINDOWS = [
   // =========================================================================
   // PERFORMANCE OPTIMIZATIONS
   // =========================================================================
-  // Disable throttling for consistent performance
+  // Disable throttling for consistent performance (CRITICAL for background capture)
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
   '--disable-background-networking',
+
+  // CRITICAL: Force rendering even when window is hidden/minimized/occluded
+  '--disable-features=CalculateNativeWinOcclusion',
+  '--force-presentation-receiver-for-testing',
 
   // Memory optimizations
   '--js-flags=--max-old-space-size=4096',

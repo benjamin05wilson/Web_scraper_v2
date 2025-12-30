@@ -1,0 +1,20 @@
+{
+  "competitor_type": "local",
+  "country": "Australia",
+  "url": "https://www.ikea.com/au/en/cat/bedsheets-10681/",
+  "selectors": {
+    "Title": [
+      "span.plp-text.plp-typography-label-m.plp-typography-regular"
+    ],
+    "Price": [
+      "span:nth-of-type(11)"
+    ],
+    "URL": [
+      "a.link"
+    ],
+    "Image": [
+      "img.plp-image"
+    ]
+  },
+  "itemContainer": "div.plp-fragment-wrapper.plp-fragment-wrapper--grid"
+}
