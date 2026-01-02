@@ -45,6 +45,7 @@ export function ScraperPage() {
   // Frame state for browser view
   const [frameData, setFrameData] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+  const browserContainerRef = useRef<HTMLDivElement>(null);
 
   // Config state from context
   const { configs, loading: configsLoading, loadConfigs } = useConfigsContext();
@@ -124,10 +125,19 @@ export function ScraperPage() {
       return;
     }
 
+    // Calculate viewport based on the browser view container size
+    let viewportWidth = 1280;
+    let viewportHeight = 720;
+    if (browserContainerRef.current) {
+      const rect = browserContainerRef.current.getBoundingClientRect();
+      viewportWidth = Math.round(rect.width) || 1280;
+      viewportHeight = Math.round(rect.height) || 720;
+    }
+
     addLog('Opening browser...');
     session.createSession({
       url,
-      viewport: { width: 1280, height: 720 },
+      viewport: { width: viewportWidth, height: viewportHeight },
     });
   }, [url, connected, session, addLog]);
 
@@ -233,6 +243,7 @@ export function ScraperPage() {
       name: selectedConfig,
       startUrl: scrapeUrl,
       selectors: [], // Will be loaded from saved config on server
+      targetProducts, // Pass target so server stops at this count
     } as any); // Cast because we're sending minimal config - server loads full config from disk
 
     // Execute the scrape
@@ -447,12 +458,11 @@ export function ScraperPage() {
 
               {/* Browser View */}
               <div
+                ref={browserContainerRef}
                 style={{
                   flex: 1,
                   position: 'relative',
                   display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
                   overflow: 'hidden',
                 }}
               >
@@ -464,13 +474,21 @@ export function ScraperPage() {
                     onClick={handleFrameClick}
                     style={{
                       width: '100%',
-                      height: 'auto',
+                      height: '100%',
                       cursor: 'pointer',
-                      objectFit: 'contain',
+                      objectFit: 'fill',
                     }}
                   />
                 ) : (
-                  <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
+                  <div style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '100%',
+                    height: '100%',
+                    color: 'var(--text-secondary)',
+                  }}>
                     {sessionStatus === 'connecting' ? (
                       <>
                         <span className="spinner" style={{ width: '50px', height: '50px', marginBottom: '20px' }} />
@@ -478,11 +496,12 @@ export function ScraperPage() {
                       </>
                     ) : (
                       <>
-                        <h3 style={{ marginBottom: '15px', color: 'var(--text-primary)' }}>Scraper</h3>
-                        <p style={{ marginBottom: '20px' }}>Click "Open Browser" to load a page</p>
-                        <p style={{ fontSize: '0.85em', opacity: 0.7 }}>
-                          Then select a config and start scraping
-                        </p>
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '20px', opacity: 0.5 }}>
+                          <rect x="3" y="3" width="18" height="18" rx="2" />
+                          <path d="M3 9h18M9 21V9" />
+                        </svg>
+                        <h3 style={{ margin: '0 0 10px 0', color: 'var(--text-primary)', fontSize: '1.2em' }}>No Browser Open</h3>
+                        <p style={{ margin: '0 0 8px 0', opacity: 0.7 }}>Enter a URL and click "Open Browser" to start</p>
                       </>
                     )}
                   </div>

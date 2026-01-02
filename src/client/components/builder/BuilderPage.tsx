@@ -2,14 +2,17 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useBrowserSession } from '../../hooks/useBrowserSession';
+import { useAutomatedBuilderFlow } from '../../hooks/useAutomatedBuilderFlow';
 import { ExtractedContentLabeler } from './ExtractedContentLabeler';
-import { DismissPanel } from './DismissPanel';
+import { PopupDetectionPanel } from './PopupDetectionPanel';
+import { AutomatedBuilderOverlay } from './AutomatedBuilderOverlay';
 import { SelectedDataSummary } from './SelectedDataSummary';
-import { PaginationConfig } from './PaginationConfig';
+import { PaginationDetector } from './PaginationDetector';
 import { createLogEntry, LogEntry } from './ActivityLog';
 import { PriceFormatModal } from './PriceFormatModal';
 import { CountrySelect } from '../common/CountrySelect';
 import { StatusIndicator } from '../common/StatusIndicator';
+import type { WSMessageType, NetworkExtractionConfig } from '../../../shared/types';
 
 type FieldType = 'Title' | 'Price' | 'URL' | 'NextPage' | 'Image';
 type LabelerFieldType = FieldType | 'Skip';
@@ -42,20 +45,6 @@ interface ExtractedItem {
   selector: string;
   displayText: string;
   tagName?: string;
-}
-
-interface DismissAction {
-  selector: string;
-  text?: string;
-  isLanguageRelated?: boolean;
-  x?: number;
-  y?: number;
-}
-
-interface PaginationPattern {
-  type: 'url_pattern' | 'next_page' | 'infinite_scroll';
-  pattern: string;
-  start_page?: number;
 }
 
 interface PriceFormat {
@@ -91,6 +80,18 @@ export function BuilderPage() {
     isAutoDetecting,
   } = session;
 
+  // Automated builder flow state machine
+  const flow = useAutomatedBuilderFlow({
+    sessionId,
+    sessionStatus,
+    send,
+    subscribe,
+    connected,
+    autoDetectProduct,
+    isAutoDetecting,
+    selectedElement,
+  });
+
   // URL and browser state
   const [url, setUrl] = useState('');
   const [status, setStatus] = useState<'idle' | 'active' | 'loading' | 'error'>('idle');
@@ -99,6 +100,7 @@ export function BuilderPage() {
   // Frame state for browser view
   const [frameData, setFrameData] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+  const browserContainerRef = useRef<HTMLDivElement>(null);
 
   // Mode state
   const [modeBadge, setModeBadge] = useState<'Browse' | 'SELECTING' | 'DISMISS'>('Browse');
@@ -117,14 +119,13 @@ export function BuilderPage() {
     NextPage: [],
     Image: [],
   });
-  const [dismissActions, setDismissActions] = useState<DismissAction[]>([]);
   const [dismissMode, setDismissMode] = useState(false);
-  const [paginationPattern, setPaginationPattern] = useState<PaginationPattern | null>(null);
 
   // Form state
   const [country, setCountry] = useState('');
   const [competitorType, setCompetitorType] = useState<'local' | 'global'>('local');
   const [suggestedConfigName, setSuggestedConfigName] = useState('');
+
 
   // Read URL query params (from batch page "Build" button)
   const [searchParams] = useSearchParams();
@@ -136,6 +137,9 @@ export function BuilderPage() {
   const [priceModalOpen, setPriceModalOpen] = useState(false);
   const [samplePrice, setSamplePrice] = useState('');
   const [pendingSave, setPendingSave] = useState<{ filename: string } | null>(null);
+
+  // Network capture state (for virtual scroll / XHR-based sites)
+  const [networkExtractionConfig, setNetworkExtractionConfig] = useState<NetworkExtractionConfig | null>(null);
 
   const addLog = useCallback((message: string, type: LogEntry['type'] = 'info') => {
     setLogEntries((prev) => [...prev, createLogEntry(message, type)]);
@@ -244,16 +248,33 @@ export function BuilderPage() {
     }
   }, [sessionStatus]);
 
-  // Update mode badge
+  // Update mode badge based on flow state
   useEffect(() => {
-    if (dismissMode) {
+    if (flow.state === 'POPUP_RECORDING' || dismissMode) {
       setModeBadge('DISMISS');
-    } else if (selectionMode) {
+    } else if (flow.state === 'MANUAL_PRODUCT_SELECT' || selectionMode) {
       setModeBadge('SELECTING');
     } else {
       setModeBadge('Browse');
     }
-  }, [selectionMode, dismissMode]);
+  }, [flow.state, selectionMode, dismissMode]);
+
+  // Sync dismiss mode with flow state
+  useEffect(() => {
+    if (flow.state === 'POPUP_RECORDING') {
+      setDismissMode(true);
+    } else if (dismissMode && flow.state !== 'POPUP_DETECTION') {
+      // Turn off dismiss mode when leaving popup-related states
+      setDismissMode(false);
+    }
+  }, [flow.state, dismissMode]);
+
+  // Enable selection mode when in manual product select state
+  useEffect(() => {
+    if (flow.state === 'MANUAL_PRODUCT_SELECT' && !selectionMode) {
+      toggleSelectionMode();
+    }
+  }, [flow.state, selectionMode, toggleSelectionMode]);
 
   // Open browser
   const handleOpenBrowser = useCallback(() => {
@@ -267,12 +288,17 @@ export function BuilderPage() {
       return;
     }
 
-    const availableWidth = window.innerWidth - 400;
-    const availableHeight = window.innerHeight - 200;
-    const viewportWidth = Math.max(1280, Math.min(availableWidth, 1920));
-    const viewportHeight = Math.max(720, Math.min(availableHeight, 1080));
+    // Calculate viewport based on the browser view container size
+    let viewportWidth = 1280;
+    let viewportHeight = 720;
+    if (browserContainerRef.current) {
+      const rect = browserContainerRef.current.getBoundingClientRect();
+      viewportWidth = Math.round(rect.width) || 1280;
+      viewportHeight = Math.round(rect.height) || 720;
+    }
 
     addLog('Opening browser...');
+    flow.startBrowser();
     session.createSession({
       url,
       viewport: { width: viewportWidth, height: viewportHeight },
@@ -283,23 +309,23 @@ export function BuilderPage() {
         send('webrtc:offer', {}, sessionId);
       }
     }, 1000);
-  }, [url, connected, session, send, addLog]);
+  }, [url, connected, session, send, addLog, flow, sessionId]);
 
   // Close browser
   const handleCloseBrowser = useCallback(() => {
     session.destroySession();
+    flow.reset();
     setFrameData(null);
     setDismissMode(false);
     setModeBadge('Browse');
     setSelectedData({ Title: [], Price: [], URL: [], NextPage: [], Image: [] });
-    setDismissActions([]);
     setExtractedItems([]);
     setContainerSelector('');
     setShowLabeler(false);
     setStatus('idle');
     setStatusText('Ready to start');
     addLog('Browser closed. Selections cleared.');
-  }, [session, addLog]);
+  }, [session, addLog, flow]);
 
   // Request video stream when session is ready
   useEffect(() => {
@@ -320,8 +346,19 @@ export function BuilderPage() {
       const y = Math.round((e.clientY - rect.top) * scaleY);
 
       send('input:mouse', { type: 'click', x, y, button: 'left' }, sessionId);
+
+      // Record dismiss action if in popup recording mode
+      if (flow.state === 'POPUP_RECORDING') {
+        // The click will be recorded by the server's InteractionRecorder
+        // We also track it locally in the flow state
+        flow.addDismissAction({
+          selector: `click at (${x}, ${y})`,
+          x,
+          y,
+        });
+      }
     },
-    [sessionId, send]
+    [sessionId, send, flow]
   );
 
   // Handle scroll on browser frame - use native event listener for passive: false
@@ -351,27 +388,6 @@ export function BuilderPage() {
     };
   }, [sessionId, send, frameData]);
 
-  // Toggle selection mode
-  const handleToggleSelectionMode = useCallback(() => {
-    if (dismissMode) {
-      setDismissMode(false);
-    }
-    toggleSelectionMode();
-    addLog(selectionMode ? 'Browse mode' : 'Selection ON - click a product card');
-  }, [toggleSelectionMode, selectionMode, dismissMode, addLog]);
-
-  // Toggle dismiss mode
-  const handleToggleDismissMode = useCallback(() => {
-    const newMode = !dismissMode;
-    setDismissMode(newMode);
-
-    if (newMode && selectionMode) {
-      toggleSelectionMode();
-    }
-
-    addLog(newMode ? 'Record mode ON - click popups or language selectors' : 'Record mode OFF');
-  }, [dismissMode, selectionMode, toggleSelectionMode, addLog]);
-
   // Handle selected element - extract container content
   // Triggers on selection mode click OR auto-detect
   useEffect(() => {
@@ -400,7 +416,7 @@ export function BuilderPage() {
 
   // Handle labels from the ExtractedContentLabeler
   const handleSaveLabels = useCallback(
-    (labels: LabeledItem[], _container: string) => {
+    (labels: LabeledItem[], container: string) => {
       // Filter out 'Skip' items and process the rest
       const validLabels = labels.filter((l): l is LabeledItem & { field: FieldType } => l.field !== 'Skip');
 
@@ -425,8 +441,12 @@ export function BuilderPage() {
       setExtractedItems([]);
       lastExtractedSelectorRef.current = '';
       addLog(`Applied ${validLabels.length} labels from container`);
+
+      // Proceed to pagination detection with the container selector
+      // This will be used to count products during scroll detection
+      flow.proceedToFinalConfig(container);
     },
-    [addLog]
+    [addLog, flow]
   );
 
   // Cancel labeling
@@ -436,13 +456,6 @@ export function BuilderPage() {
     lastExtractedSelectorRef.current = '';
     addLog('Labeling cancelled');
   }, [addLog]);
-
-  // Auto-detect product
-  const handleAutoDetect = useCallback(() => {
-    if (!sessionId) return;
-    addLog('Auto-detecting product card...');
-    autoDetectProduct();
-  }, [sessionId, autoDetectProduct, addLog]);
 
   // Remove selection
   const handleRemoveSelection = useCallback(
@@ -462,13 +475,12 @@ export function BuilderPage() {
   // Clear all selections
   const handleClearSelections = useCallback(() => {
     setSelectedData({ Title: [], Price: [], URL: [], NextPage: [], Image: [] });
-    setDismissActions([]);
-    setPaginationPattern(null);
+    flow.reset();
     setExtractedItems([]);
     setShowLabeler(false);
     clearLog();
     addLog('All selections cleared');
-  }, [addLog, clearLog]);
+  }, [addLog, clearLog, flow]);
 
   // Train and save config
   const handleTrainAndSave = useCallback(async () => {
@@ -483,6 +495,7 @@ export function BuilderPage() {
     const filename = prompt('Config name:', defaultName);
     if (!filename) return;
 
+    flow.startSaving();
     addLog('-------------------------------');
     addLog(`SAVING CONFIG: ${filename}`, 'success');
     setStatus('loading');
@@ -528,7 +541,7 @@ export function BuilderPage() {
       setStatus('error');
       setStatusText('Error');
     }
-  }, [url, selectedData, addLog, suggestedConfigName]);
+  }, [url, selectedData, addLog, suggestedConfigName, flow]);
 
   // Complete save after price format confirmation
   const completeSave = useCallback(
@@ -565,15 +578,23 @@ export function BuilderPage() {
           saveBody.itemContainer = containerSelector;
         }
 
-        if (dismissActions.length > 0) {
-          saveBody.dismiss_actions = dismissActions;
+        // Use dismiss actions from flow state
+        if (flow.dismissActions.length > 0) {
+          saveBody.dismiss_actions = flow.dismissActions;
         }
         if (priceFormat) {
           saveBody.price_format = priceFormat;
         }
-        if (paginationPattern) {
-          saveBody.pagination = paginationPattern;
-          addLog(`Pagination pattern: ${paginationPattern.pattern}`);
+        // Use pagination pattern from flow state
+        if (flow.detectedPagination) {
+          saveBody.pagination = flow.detectedPagination;
+          addLog(`Pagination: ${flow.detectedPagination.type} - ${flow.detectedPagination.pattern || flow.detectedPagination.selector || 'infinite scroll'}`);
+        }
+
+        // Include network extraction config if configured
+        if (networkExtractionConfig) {
+          saveBody.networkExtraction = networkExtractionConfig;
+          addLog(`Network extraction: ${networkExtractionConfig.urlPatterns.join(', ')}`);
         }
 
         const saveResponse = await fetch('/api/save', {
@@ -590,6 +611,7 @@ export function BuilderPage() {
         addLog('-------------------------------');
         setStatus('active');
         setStatusText('Config saved!');
+        flow.completeSave();
       } catch (e) {
         const error = e instanceof Error ? e.message : 'Unknown error';
         addLog(`Error: ${error}`, 'error');
@@ -597,7 +619,7 @@ export function BuilderPage() {
         setStatusText('Error');
       }
     },
-    [competitorType, country, dismissActions, paginationPattern, addLog, selectedData, url, containerSelector]
+    [competitorType, country, addLog, selectedData, url, containerSelector, flow, networkExtractionConfig]
   );
 
   const handlePriceFormatConfirm = useCallback(
@@ -610,15 +632,52 @@ export function BuilderPage() {
     [pendingSave, completeSave]
   );
 
+  // Handle overlay confirmations
+  const handleOverlayConfirm = useCallback((confirmed: boolean) => {
+    switch (flow.overlayType) {
+      case 'popup':
+        flow.handlePopupConfirm(confirmed);
+        break;
+      case 'product':
+        flow.handleProductConfirm(confirmed);
+        break;
+      case 'pagination':
+        flow.handlePaginationConfirm(confirmed);
+        break;
+    }
+  }, [flow]);
+
   const isBrowserOpen = sessionId !== null;
+
+  // Determine which panels to show based on flow state
+  const showPopupPanel = flow.state === 'POPUP_RECORDING';
+  const showProductSelection = ['MANUAL_PRODUCT_SELECT', 'PRODUCT_CONFIRMATION', 'AUTO_DETECTING_PRODUCT'].includes(flow.state);
+  const showLabelingPanel = flow.state === 'LABELING' || showLabeler;
+  // Only show full pagination panel for manual configuration
+  const showPaginationPanel = flow.state === 'PAGINATION_MANUAL';
+  const showFinalConfig = ['FINAL_CONFIG', 'SAVING', 'COMPLETE'].includes(flow.state);
 
   return (
     <>
       <div className="hero">
         <span className="hero-badge">Config Builder</span>
         <h1>Build Scraper</h1>
-        <p className="hero-subtitle">Click a product card, then label its contents to create scraping configs</p>
+        <p className="hero-subtitle">
+          {flow.state === 'IDLE' ? 'Enter a URL and click Open Browser to start' : `Step ${flow.currentStepNumber}: ${flow.currentStepTitle}`}
+        </p>
       </div>
+
+      {/* Automated Builder Overlay */}
+      <AutomatedBuilderOverlay
+        type={flow.overlayType}
+        isVisible={flow.showOverlay}
+        onConfirm={handleOverlayConfirm}
+        dismissCount={flow.dismissActions.length}
+        detectedProduct={flow.detectedProduct}
+        productConfidence={flow.productConfidence}
+        productScreenshot={flow.productScreenshot}
+        detectedPagination={flow.detectedPagination}
+      />
 
       <div style={{ padding: '0 20px', maxWidth: '100%' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: '20px', marginBottom: '30px', alignItems: 'start' }}>
@@ -656,47 +715,42 @@ export function BuilderPage() {
               </div>
             </div>
 
-            {/* Dismiss Panel */}
-            <DismissPanel
-              dismissMode={dismissMode}
-              onToggleDismissMode={handleToggleDismissMode}
-              dismissActions={dismissActions}
-              disabled={!isBrowserOpen}
-            />
+            {/* Popup Detection Panel - shows during popup recording */}
+            {showPopupPanel && (
+              <PopupDetectionPanel
+                isRecording={flow.state === 'POPUP_RECORDING'}
+                dismissActions={flow.dismissActions}
+                onFinishRecording={flow.finishDismissRecording}
+              />
+            )}
 
-            {/* Selection Mode */}
-            <div className="step-card">
-              <h2 className="step-title">Select Product Card</h2>
-              <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-                <button
-                  className="btn-large"
-                  onClick={handleToggleSelectionMode}
-                  disabled={!isBrowserOpen}
-                  style={{
-                    flex: 1,
-                    background: selectionMode ? 'var(--accent-danger)' : 'var(--accent-success)',
-                    borderColor: selectionMode ? 'var(--accent-danger)' : 'var(--accent-success)',
-                  }}
-                >
-                  {selectionMode ? 'STOP SELECTING' : 'START SELECTING'}
-                </button>
-                <button
-                  className="btn secondary"
-                  onClick={handleAutoDetect}
-                  disabled={!isBrowserOpen || isAutoDetecting}
-                  style={{ padding: '12px 16px' }}
-                  title="Auto-detect first product"
-                >
-                  {isAutoDetecting ? '...' : 'Auto'}
-                </button>
+            {/* Product Selection Status - shows during product detection */}
+            {showProductSelection && (
+              <div className="step-card">
+                <h2 className="step-title">
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <path d="M3 9h18M9 21V9" />
+                    </svg>
+                    Product Card
+                  </span>
+                </h2>
+                {flow.state === 'AUTO_DETECTING_PRODUCT' && (
+                  <p style={{ color: 'var(--text-secondary)' }}>
+                    Detecting product card automatically...
+                  </p>
+                )}
+                {flow.state === 'MANUAL_PRODUCT_SELECT' && (
+                  <p style={{ color: 'var(--text-secondary)' }}>
+                    Click on a product card in the browser to select it.
+                  </p>
+                )}
               </div>
-              <p style={{ fontSize: '0.85em', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.6 }}>
-                Click on a <strong>product card</strong> in the browser. All text, links, and images will be extracted for you to label.
-              </p>
-            </div>
+            )}
 
             {/* Extracted Content Labeler - shows when container is selected */}
-            {showLabeler && extractedItems.length > 0 && (
+            {showLabelingPanel && extractedItems.length > 0 && (
               <ExtractedContentLabeler
                 items={extractedItems}
                 containerSelector={containerSelector}
@@ -711,82 +765,101 @@ export function BuilderPage() {
               onRemove={handleRemoveSelection}
             />
 
-            {/* Pagination Config */}
-            <PaginationConfig baseUrl={url} pattern={paginationPattern} onPatternDetected={setPaginationPattern} />
+            {/* Pagination Detection - shows after labeling */}
+            {showPaginationPanel && (
+              <PaginationDetector
+                baseUrl={url}
+                sessionId={sessionId}
+                send={send as (type: WSMessageType, payload: unknown, sessionId?: string) => void}
+                subscribe={subscribe}
+                pattern={flow.detectedPagination}
+                onPatternDetected={(pattern) => {
+                  if (pattern) {
+                    flow.setPaginationManual(pattern);
+                  }
+                }}
+              />
+            )}
 
-            {/* Country Selection */}
-            <div className="step-card">
-              <h2 className="step-title">Country</h2>
-              <CountrySelect value={country} onChange={setCountry} />
-            </div>
+            {/* Country Selection - shows in final config */}
+            {showFinalConfig && (
+              <div className="step-card">
+                <h2 className="step-title">Country</h2>
+                <CountrySelect value={country} onChange={setCountry} />
+              </div>
+            )}
 
-            {/* Competitor Type */}
-            <div className="step-card">
-              <h2 className="step-title">Competitor Type</h2>
-              <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    cursor: 'pointer',
-                    padding: '12px 15px',
-                    background: 'var(--bg-secondary)',
-                    border: `1px solid ${competitorType === 'local' ? 'var(--accent-primary)' : 'var(--border-color)'}`,
-                    flex: 1,
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="competitor-type"
-                    value="local"
-                    checked={competitorType === 'local'}
-                    onChange={() => setCompetitorType('local')}
-                    style={{ cursor: 'pointer' }}
-                  />
-                  <span style={{ fontSize: '0.9em' }}>Local</span>
-                </label>
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    cursor: 'pointer',
-                    padding: '12px 15px',
-                    background: 'var(--bg-secondary)',
-                    border: `1px solid ${competitorType === 'global' ? 'var(--accent-primary)' : 'var(--border-color)'}`,
-                    flex: 1,
-                  }}
-                >
-                  <input
-                    type="radio"
-                    name="competitor-type"
-                    value="global"
-                    checked={competitorType === 'global'}
-                    onChange={() => setCompetitorType('global')}
-                    style={{ cursor: 'pointer' }}
-                  />
-                  <span style={{ fontSize: '0.9em' }}>Global</span>
-                </label>
+            {/* Competitor Type - shows in final config */}
+            {showFinalConfig && (
+              <div className="step-card">
+                <h2 className="step-title">Competitor Type</h2>
+                <div style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      cursor: 'pointer',
+                      padding: '12px 15px',
+                      background: 'var(--bg-secondary)',
+                      border: `1px solid ${competitorType === 'local' ? 'var(--accent-primary)' : 'var(--border-color)'}`,
+                      flex: 1,
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="competitor-type"
+                      value="local"
+                      checked={competitorType === 'local'}
+                      onChange={() => setCompetitorType('local')}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <span style={{ fontSize: '0.9em' }}>Local</span>
+                  </label>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '10px',
+                      cursor: 'pointer',
+                      padding: '12px 15px',
+                      background: 'var(--bg-secondary)',
+                      border: `1px solid ${competitorType === 'global' ? 'var(--accent-primary)' : 'var(--border-color)'}`,
+                      flex: 1,
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="competitor-type"
+                      value="global"
+                      checked={competitorType === 'global'}
+                      onChange={() => setCompetitorType('global')}
+                      style={{ cursor: 'pointer' }}
+                    />
+                    <span style={{ fontSize: '0.9em' }}>Global</span>
+                  </label>
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Save Actions */}
-            <div className="step-card">
-              <h2 className="step-title">Save Config</h2>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <button className="btn-large" onClick={handleTrainAndSave}>
-                  Train and Save Config
-                </button>
-                <button className="btn secondary" onClick={handleClearSelections}>
-                  Clear All
-                </button>
+            {/* Save Actions - shows in final config */}
+            {showFinalConfig && (
+              <div className="step-card">
+                <h2 className="step-title">Save Config</h2>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <button className="btn-large" onClick={handleTrainAndSave}>
+                    Train and Save Config
+                  </button>
+                  <button className="btn secondary" onClick={handleClearSelections}>
+                    Clear All
+                  </button>
+                </div>
+                <div className="status-strip" style={{ marginTop: '15px' }}>
+                  <StatusIndicator status={status} />
+                  <span className="status-label">{statusText}</span>
+                </div>
               </div>
-              <div className="status-strip" style={{ marginTop: '15px' }}>
-                <StatusIndicator status={status} />
-                <span className="status-label">{statusText}</span>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Right Panel: Browser - sticky */}
@@ -806,7 +879,8 @@ export function BuilderPage() {
               style={{
                 background: '#1a1a1a',
                 border: '1px solid var(--border-color)',
-                minHeight: '450px',
+                minHeight: '600px',
+                height: 'calc(100vh - 180px)',
                 display: 'flex',
                 flexDirection: 'column',
                 overflow: 'hidden',
@@ -863,12 +937,11 @@ export function BuilderPage() {
 
               {/* Browser View */}
               <div
+                ref={browserContainerRef}
                 style={{
                   flex: 1,
                   position: 'relative',
                   display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
                   overflow: 'hidden',
                 }}
               >
@@ -880,18 +953,27 @@ export function BuilderPage() {
                     onClick={handleFrameClick}
                     style={{
                       width: '100%',
-                      height: 'auto',
-                      cursor: selectionMode ? 'crosshair' : 'pointer',
-                      objectFit: 'contain',
+                      height: '100%',
+                      cursor: selectionMode || flow.state === 'POPUP_RECORDING' ? 'crosshair' : 'pointer',
+                      objectFit: 'fill',
                     }}
                   />
                 ) : (
-                  <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
-                    <h3 style={{ marginBottom: '15px', color: 'var(--text-primary)' }}>Config Builder</h3>
-                    <p style={{ marginBottom: '20px' }}>Click "Open Browser" to load a page</p>
-                    <p style={{ fontSize: '0.85em', opacity: 0.7 }}>
-                      Then click a product card to extract and label its content
-                    </p>
+                  <div style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    width: '100%',
+                    height: '100%',
+                    color: 'var(--text-secondary)',
+                  }}>
+                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '20px', opacity: 0.5 }}>
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <path d="M3 9h18M9 21V9" />
+                    </svg>
+                    <h3 style={{ margin: '0 0 10px 0', color: 'var(--text-primary)', fontSize: '1.2em' }}>No Browser Open</h3>
+                    <p style={{ margin: '0 0 8px 0', opacity: 0.7 }}>Enter a URL and click "Open Browser" to start</p>
                   </div>
                 )}
               </div>

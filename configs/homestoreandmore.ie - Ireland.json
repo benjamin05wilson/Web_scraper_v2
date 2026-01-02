@@ -1,0 +1,30 @@
+{
+  "competitor_type": "local",
+  "country": "Ireland",
+  "url": "https://www.homestoreandmore.ie/duvet-covers",
+  "selectors": {
+    "Title": [
+      "a.name-link > h3 > span:nth-of-type(1)"
+    ],
+    "Price": [
+      "div.product-pricing.product-price"
+    ],
+    "URL": [
+      "a.thumb-link"
+    ],
+    "Image": [
+      "img.ls-is-cached.lazyloaded"
+    ]
+  },
+  "itemContainer": "li.grid-tile.grid-tile_product",
+  "dismiss_actions": [
+    {
+      "selector": "[aria-label*=\"cookie\" i] button",
+      "text": "No, adjust"
+    },
+    {
+      "selector": "[aria-label*=\"accept\" i][aria-label*=\"cookie\" i]",
+      "text": "Accept all"
+    }
+  ]
+}

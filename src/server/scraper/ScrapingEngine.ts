@@ -10,11 +10,15 @@ import type {
   ScrapeResult,
   ScrapedItem,
   RecorderAction,
+  OffsetConfig,
+  NetworkExtractionConfig,
 } from '../../shared/types.js';
+import { NetworkInterceptor, type InterceptedProduct } from './handlers/NetworkInterceptor.js';
 
 export class ScrapingEngine {
   private page: Page;
   private cdp: CDPSession;
+  private currentPage: number = 1;
 
   constructor(page: Page, cdp: CDPSession) {
     this.page = page;
@@ -30,6 +34,15 @@ export class ScrapingEngine {
     const allItems: ScrapedItem[] = [];
     let pagesScraped = 0;
     const targetProducts = config.targetProducts || 0; // 0 = unlimited
+
+    // Reset page counter for new scrape
+    this.currentPage = 1;
+
+    // Check for network extraction mode (for virtual scroll / XHR-based sites)
+    if ((config as any).networkExtraction?.enabled) {
+      console.log(`[ScrapingEngine] Using NETWORK EXTRACTION mode`);
+      return this.executeWithNetworkExtraction(config, startTime, targetProducts);
+    }
 
     // Ensure selectors is always an array
     const selectors = Array.isArray(config.selectors) ? config.selectors : [];
@@ -74,8 +87,15 @@ export class ScrapingEngine {
 
       // Auto-scroll to load lazy content if enabled
       if (config.autoScroll !== false) {
-        console.log('[ScrapingEngine] Auto-scrolling to load lazy content...');
-        await this.autoScrollToLoadContent(config.selectors, targetProducts);
+        // Check if we have recorded scroll positions to replay
+        const scrollPositions = config.advanced?.scrollPositions;
+        if (scrollPositions && scrollPositions.length > 0) {
+          console.log(`[ScrapingEngine] Using ${scrollPositions.length} recorded scroll positions...`);
+          await this.replayScrollPositions(scrollPositions, targetProducts, config.selectors);
+        } else {
+          console.log('[ScrapingEngine] Auto-scrolling to load lazy content...');
+          await this.autoScrollToLoadContent(config.selectors, targetProducts);
+        }
       }
 
       // Scrape pages
@@ -101,7 +121,7 @@ export class ScrapingEngine {
 
         // Check for pagination
         if (config.pagination?.enabled && pageNum < maxPages - 1) {
-          const hasNextPage = await this.goToNextPage(config.pagination.selector);
+          const hasNextPage = await this.goToNextPage(config.pagination);
           if (!hasNextPage) {
             console.log('[ScrapingEngine] No more pages');
             break;
@@ -110,6 +130,17 @@ export class ScrapingEngine {
           // Wait after click if configured
           if (config.pagination.waitAfterClick) {
             await new Promise((r) => setTimeout(r, config.pagination!.waitAfterClick));
+          }
+
+          // IMPORTANT: After navigating to new page, we need to scroll to load lazy content
+          // Otherwise we'll just extract the same products from the top of each page
+          if (config.autoScroll !== false) {
+            console.log('[ScrapingEngine] Scrolling new page to load lazy content...');
+            // Disable lazy loading mechanisms on the new page
+            await this.disableLazyLoading();
+            await new Promise((r) => setTimeout(r, 300));
+            // Scroll to load content on this page
+            await this.autoScrollToLoadContent(config.selectors, targetProducts - allItems.length);
           }
         }
       }
@@ -141,6 +172,148 @@ export class ScrapingEngine {
         errors: [errorMessage],
       };
     }
+  }
+
+  // =========================================================================
+  // NETWORK EXTRACTION MODE (for virtual scroll / XHR-based sites)
+  // =========================================================================
+
+  private async executeWithNetworkExtraction(
+    config: ScraperConfig,
+    startTime: number,
+    targetProducts: number
+  ): Promise<ScrapeResult> {
+    const networkConfig = (config as any).networkExtraction as NetworkExtractionConfig;
+
+    console.log(`[ScrapingEngine] Network extraction: ${config.name}`);
+    console.log(`[ScrapingEngine] URL patterns: ${networkConfig.urlPatterns.join(', ')}`);
+    console.log(`[ScrapingEngine] Target products: ${targetProducts || 'unlimited'}`);
+
+    try {
+      // Create network interceptor
+      const interceptor = new NetworkInterceptor(this.page, {
+        urlPatterns: networkConfig.urlPatterns,
+        dataPath: networkConfig.dataPath,
+        fieldMappings: networkConfig.fieldMappings,
+      });
+
+      // Start listening BEFORE navigation
+      await interceptor.startListening();
+
+      // Navigate to start URL
+      console.log(`[ScrapingEngine] Navigating to: ${config.startUrl}`);
+      await this.page.goto(config.startUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+
+      // Execute pre-actions (popups, cookies, etc.) if defined
+      if (config.preActions && config.preActions.actions.length > 0) {
+        console.log(`[ScrapingEngine] Executing ${config.preActions.actions.length} pre-actions`);
+        await this.executePreActions(config.preActions.actions);
+      }
+
+      // Scroll to trigger XHR requests for products
+      console.log('[ScrapingEngine] Scrolling to trigger network requests...');
+      await this.scrollToTriggerNetworkRequests(interceptor, targetProducts);
+
+      // Get captured products
+      const capturedProducts = interceptor.getProducts();
+      console.log(`[ScrapingEngine] Captured ${capturedProducts.length} products from network`);
+
+      // Stop interceptor
+      interceptor.stopListening();
+
+      // Convert intercepted products to ScrapedItem format
+      const items: ScrapedItem[] = capturedProducts.map((product: InterceptedProduct) => ({
+        title: product.title || null,
+        price: product.price || null,
+        url: product.url || null,
+        image: product.image || null,
+      }));
+
+      // Truncate to target if needed
+      if (targetProducts > 0 && items.length > targetProducts) {
+        items.length = targetProducts;
+      }
+
+      return {
+        success: true,
+        items,
+        pagesScraped: 1,
+        duration: Date.now() - startTime,
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[ScrapingEngine] Network extraction error: ${errorMessage}`);
+
+      return {
+        success: false,
+        items: [],
+        pagesScraped: 0,
+        duration: Date.now() - startTime,
+        errors: [errorMessage],
+      };
+    }
+  }
+
+  /**
+   * Scroll to trigger network requests for product data
+   * Used in network extraction mode where products are loaded via XHR
+   */
+  private async scrollToTriggerNetworkRequests(
+    interceptor: NetworkInterceptor,
+    targetProducts: number
+  ): Promise<void> {
+    const maxScrollIterations = 50;
+    const scrollStepSize = 500;
+    const scrollDelay = 800;
+
+    let iteration = 0;
+    let noChangeCount = 0;
+    const maxNoChange = 5;
+
+    while (iteration < maxScrollIterations && noChangeCount < maxNoChange) {
+      const beforeCount = interceptor.getProductCount();
+
+      // Check if we've reached target
+      if (targetProducts > 0 && beforeCount >= targetProducts) {
+        console.log(`[ScrapingEngine] Reached target of ${targetProducts} products`);
+        break;
+      }
+
+      // Scroll down
+      await this.page.evaluate((step) => {
+        window.scrollBy({ top: step, behavior: 'smooth' });
+      }, scrollStepSize);
+
+      // Wait for network requests
+      await new Promise((r) => setTimeout(r, scrollDelay));
+
+      const afterCount = interceptor.getProductCount();
+
+      if (afterCount > beforeCount) {
+        console.log(`[ScrapingEngine] Network scroll: captured ${afterCount - beforeCount} new products (total: ${afterCount})`);
+        noChangeCount = 0;
+      } else {
+        noChangeCount++;
+      }
+
+      iteration++;
+
+      // Log progress periodically
+      if (iteration % 10 === 0) {
+        console.log(`[ScrapingEngine] Scroll iteration ${iteration}, ${afterCount} products captured`);
+      }
+    }
+
+    // Final scroll to bottom to catch any remaining
+    await this.page.evaluate(() => {
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+    });
+    await new Promise((r) => setTimeout(r, 1000));
+
+    console.log(`[ScrapingEngine] Network scroll complete: ${interceptor.getProductCount()} products`);
   }
 
   // =========================================================================
@@ -1129,7 +1302,56 @@ export class ScrapingEngine {
   // PAGINATION
   // =========================================================================
 
-  private async goToNextPage(selector: string): Promise<boolean> {
+  private async goToNextPage(pagination: NonNullable<ScraperConfig['pagination']>): Promise<boolean> {
+    // Check if this is URL-based offset pagination
+    if (pagination.type === 'url_pattern' && pagination.offset) {
+      return this.goToNextPageByUrl(pagination.offset);
+    }
+
+    // Click-based pagination
+    return this.goToNextPageByClick(pagination.selector || '');
+  }
+
+  private async goToNextPageByUrl(offset: OffsetConfig): Promise<boolean> {
+    const { key, start, increment } = offset;
+    const nextPage = this.currentPage + 1;
+
+    // Calculate the offset value for the next page
+    // Page 1 = start, Page 2 = start + increment, Page 3 = start + 2*increment, etc.
+    const offsetValue = start + (nextPage - 1) * increment;
+
+    try {
+      const currentUrl = new URL(this.page.url());
+      currentUrl.searchParams.set(key, String(offsetValue));
+      const nextUrl = currentUrl.toString();
+
+      console.log(`[ScrapingEngine] Navigating to page ${nextPage} via URL: ${key}=${offsetValue}`);
+
+      await this.page.goto(nextUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000,
+      });
+
+      // Brief wait for any JS to execute
+      await new Promise((r) => setTimeout(r, 500));
+
+      this.currentPage++;
+      console.log(`[ScrapingEngine] Navigated to page ${this.currentPage}`);
+
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[ScrapingEngine] Failed to navigate by URL: ${message}`);
+      return false;
+    }
+  }
+
+  private async goToNextPageByClick(selector: string): Promise<boolean> {
+    if (!selector) {
+      console.log('[ScrapingEngine] No selector for click-based pagination');
+      return false;
+    }
+
     // Check if next page button exists and is clickable
     const exists = await this.page.evaluate((sel) => {
       const el = document.querySelector(sel);
@@ -1160,6 +1382,7 @@ export class ScrapingEngine {
     // Brief wait for any JS to execute
     await new Promise((r) => setTimeout(r, 500));
 
+    this.currentPage++;
     return true;
   }
 
@@ -1326,6 +1549,73 @@ export class ScrapingEngine {
     });
   }
 
+  /**
+   * Replay recorded scroll positions from config builder
+   * This is faster than auto-scroll because we know exactly where to scroll
+   */
+  private async replayScrollPositions(
+    scrollPositions: number[],
+    targetProducts: number = 0,
+    selectors: AssignedSelector[]
+  ): Promise<void> {
+    console.log(`[ScrapingEngine] Replaying ${scrollPositions.length} recorded scroll positions...`);
+
+    // Helper to get current element count
+    const getElementCount = async (): Promise<number> => {
+      return await this.page.evaluate((sels) => {
+        let total = 0;
+        sels.forEach((sel: { selector: { css: string } }) => {
+          if (sel.selector.css === ':parent-link') return;
+          total += document.querySelectorAll(sel.selector.css).length;
+        });
+        return total;
+      }, selectors);
+    };
+
+    const initialCount = await getElementCount();
+    console.log(`[ScrapingEngine] Initial element count: ${initialCount}`);
+
+    // Scroll to each recorded position
+    for (let i = 0; i < scrollPositions.length; i++) {
+      const targetY = scrollPositions[i];
+
+      // Scroll instantly to the recorded position
+      await this.page.evaluate((y) => {
+        window.scrollTo({ top: y, behavior: 'instant' });
+      }, targetY);
+
+      // Wait for content to load
+      await this.page.waitForTimeout(1000);
+      await this.triggerLazyLoadEvents();
+      await this.waitForLoadingToComplete(2000);
+
+      const currentCount = await getElementCount();
+      console.log(`[ScrapingEngine] Scroll ${i + 1}/${scrollPositions.length} to Y=${targetY}: ${currentCount} elements`);
+
+      // Check if we've reached target
+      if (targetProducts > 0 && currentCount >= targetProducts) {
+        console.log(`[ScrapingEngine] Reached target ${targetProducts} products at scroll ${i + 1}`);
+        break;
+      }
+    }
+
+    // Also scroll to bottom to catch any remaining lazy-loaded content
+    await this.page.evaluate(() => {
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+    });
+    await this.page.waitForTimeout(1000);
+    await this.triggerLazyLoadEvents();
+
+    const finalCount = await getElementCount();
+    console.log(`[ScrapingEngine] Scroll replay complete: ${finalCount} total elements (${finalCount - initialCount} loaded)`);
+
+    // Scroll back to top
+    await this.page.evaluate(() => {
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    });
+    await this.page.waitForTimeout(300);
+  }
+
   private async autoScrollToLoadContent(selectors: AssignedSelector[], targetProducts: number = 0): Promise<void> {
     const scrollDelay = 800; // Ms between scroll steps
     const slowScrollDelay = 1000; // Ms for slow scroll-up
@@ -1371,13 +1661,14 @@ export class ScrapingEngine {
     console.log(`[ScrapingEngine] Initial element count: ${totalElementCount}`);
 
     // =========================================================================
-    // STRATEGY 1: Jump to bottom repeatedly until nothing loads
-    // Works for most sites (Zara, Amazon, typical infinite scroll)
+    // STRATEGY 1: Scroll slowly DOWN to trigger lazy loading
+    // Many sites require seeing the scroll happen progressively to load content
     // =========================================================================
-    console.log(`[ScrapingEngine] Strategy 1: Scroll to bottom to load content${targetProducts > 0 ? ` (target: ${targetProducts} products)` : ''}...`);
+    console.log(`[ScrapingEngine] Strategy 1: Scroll slowly DOWN to load content${targetProducts > 0 ? ` (target: ${targetProducts} products)` : ''}...`);
 
     let iteration = 0;
     let noChangeAtBottomCount = 0;
+    let currentScrollY = 0;
 
     while (iteration < maxIterations && noChangeAtBottomCount < noChangeThreshold) {
       // Check if we've reached target products BEFORE scrolling more
@@ -1390,10 +1681,46 @@ export class ScrapingEngine {
       const beforeCount = totalElementCount;
       const beforeHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
 
-      // Jump straight to bottom (fast)
-      await this.page.evaluate(() => {
-        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
-      });
+      // Get current scroll position
+      const scrollInfo = await this.page.evaluate(() => ({
+        scrollY: window.scrollY,
+        innerHeight: window.innerHeight,
+        scrollHeight: document.documentElement.scrollHeight,
+      }));
+
+      // Check if we're at the bottom
+      const atBottom = scrollInfo.scrollY + scrollInfo.innerHeight >= scrollInfo.scrollHeight - 50;
+
+      if (atBottom) {
+        // We're at the bottom - check if document expanded
+        const afterHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
+
+        if (afterHeight <= beforeHeight) {
+          // Document didn't expand, no more content to load
+          noChangeAtBottomCount++;
+          console.log(`[ScrapingEngine] At bottom, no expansion (${noChangeAtBottomCount}/${noChangeThreshold})`);
+
+          if (noChangeAtBottomCount >= noChangeThreshold) {
+            break;
+          }
+
+          // Wait a bit and try again (some sites load on delay)
+          await new Promise((r) => setTimeout(r, scrollDelay));
+          continue;
+        } else {
+          // Document expanded, keep scrolling
+          console.log(`[ScrapingEngine] Page expanded: ${beforeHeight}px -> ${afterHeight}px`);
+          noChangeAtBottomCount = 0;
+        }
+      }
+
+      // Scroll down slowly (like a human would)
+      currentScrollY = scrollInfo.scrollY + scrollStepSize;
+      await this.page.evaluate((y) => {
+        window.scrollTo({ top: y, behavior: 'smooth' });
+      }, currentScrollY);
+
+      // Wait for scroll and content to load
       await new Promise((r) => setTimeout(r, scrollDelay));
       await this.triggerLazyLoadEvents();
       await this.waitForLoadingToComplete(loadingWaitTimeout);
@@ -1403,7 +1730,7 @@ export class ScrapingEngine {
       const afterHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
 
       if (afterCount > beforeCount) {
-        console.log(`[ScrapingEngine] Loaded ${afterCount - beforeCount} new elements (total: ${afterCount})`);
+        console.log(`[ScrapingEngine] Scroll-down loaded ${afterCount - beforeCount} new elements (total: ${afterCount})`);
         totalElementCount = afterCount;
         noChangeAtBottomCount = 0; // Reset counter since we found new content
 
@@ -1416,15 +1743,12 @@ export class ScrapingEngine {
         // Page expanded but no new elements yet - keep going
         console.log(`[ScrapingEngine] Page expanded: ${beforeHeight}px -> ${afterHeight}px`);
         noChangeAtBottomCount = 0;
-      } else {
-        // At bottom with no new content and no expansion
-        noChangeAtBottomCount++;
-        console.log(`[ScrapingEngine] At bottom, no new content (${noChangeAtBottomCount}/${noChangeThreshold})`);
       }
+      // Note: Don't increment noChangeAtBottomCount here - only when at bottom
 
       // Log progress periodically
-      if (iteration % 5 === 0) {
-        console.log(`[ScrapingEngine] Progress: iteration ${iteration}, ${totalElementCount} elements`);
+      if (iteration % 10 === 0) {
+        console.log(`[ScrapingEngine] Scroll progress: iteration ${iteration}, Y=${currentScrollY}, ${totalElementCount} elements`);
       }
     }
 
@@ -1738,8 +2062,8 @@ export class ScrapingEngine {
       }
     }
 
-    // Validate pagination selector if enabled
-    if (config.pagination?.enabled) {
+    // Validate pagination selector if enabled (only for click-based pagination)
+    if (config.pagination?.enabled && config.pagination.selector) {
       const paginationExists = await this.page.evaluate(
         (css) => !!document.querySelector(css),
         config.pagination.selector

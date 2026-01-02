@@ -1,0 +1,26 @@
+{
+  "competitor_type": "local",
+  "country": "Germany",
+  "url": "https://www.otto.de/heimtextilien/bettwaesche/",
+  "selectors": {
+    "Title": [
+      "div:nth-of-type(1) > div:nth-of-type(2) > header > oc-link-v2 > a > p:nth-of-type(2)"
+    ],
+    "Price": [
+      "div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(2) > div:nth-of-type(1) > span:nth-of-type(1)"
+    ],
+    "URL": [
+      "div:nth-of-type(1) > div:nth-of-type(2) > header > oc-link-v2 > a"
+    ],
+    "Image": [
+      "span.ub64e > picture > img"
+    ]
+  },
+  "itemContainer": "article.product.similar",
+  "dismiss_actions": [
+    {
+      "selector": "[aria-label*=\"cookie\" i] button",
+      "text": "OK"
+    }
+  ]
+}

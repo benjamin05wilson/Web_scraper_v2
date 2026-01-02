@@ -1,4 +1,4 @@
-export type WSMessageType = 'session:create' | 'session:created' | 'session:destroy' | 'session:error' | 'navigate' | 'navigate:complete' | 'input:mouse' | 'input:keyboard' | 'input:scroll' | 'dom:hover' | 'dom:highlight' | 'dom:select' | 'dom:selected' | 'selector:test' | 'selector:result' | 'selector:findPattern' | 'selector:pattern' | 'selector:highlightAll' | 'selector:highlighted' | 'selector:clearHighlight' | 'recorder:start' | 'recorder:stop' | 'recorder:action' | 'scrape:configure' | 'scrape:execute' | 'scrape:result' | 'scrape:error' | 'webrtc:offer' | 'webrtc:answer' | 'webrtc:ice' | 'url:hover' | 'url:captured' | 'url:history' | 'container:extract' | 'container:content';
+export type WSMessageType = 'session:create' | 'session:created' | 'session:destroy' | 'session:error' | 'navigate' | 'navigate:complete' | 'input:mouse' | 'input:keyboard' | 'input:scroll' | 'dom:hover' | 'dom:highlight' | 'dom:select' | 'dom:selected' | 'dom:autoDetect' | 'dom:autoDetectResult' | 'dom:lowConfidence' | 'selector:test' | 'selector:result' | 'selector:findPattern' | 'selector:pattern' | 'selector:highlightAll' | 'selector:highlighted' | 'selector:clearHighlight' | 'recorder:start' | 'recorder:stop' | 'recorder:action' | 'scrape:configure' | 'scrape:execute' | 'scrape:result' | 'scrape:error' | 'webrtc:offer' | 'webrtc:answer' | 'webrtc:ice' | 'url:hover' | 'url:captured' | 'url:history' | 'container:extract' | 'container:content' | 'pagination:detect' | 'pagination:candidates' | 'scrollTest:start' | 'scrollTest:update' | 'scrollTest:complete' | 'scrollTest:result';
 export interface WSMessage<T = unknown> {
     type: WSMessageType;
     sessionId?: string;
@@ -53,7 +53,8 @@ export interface ElementSelector {
     css: string;
     cssGeneric?: string;
     cssGenericCount?: number;
-    xpath: string;
+    cssSpecific?: string;
+    xpath?: string;
     text?: string;
     attributes: Record<string, string>;
     tagName: string;
@@ -63,6 +64,8 @@ export interface ElementSelector {
         width: number;
         height: number;
     };
+    confidence?: number;
+    fallbackRecommended?: boolean;
 }
 export interface DOMHighlight {
     selector: string;
@@ -112,6 +115,28 @@ export interface RecorderSequence {
     actions: RecorderAction[];
     createdAt: number;
 }
+/** Scroll strategy for lazy loading */
+export type ScrollStrategy = 'adaptive' | 'rapid' | 'fixed';
+export interface AdvancedScraperConfig {
+    /** Scroll strategy: 'adaptive' (wait for DOM stability), 'rapid' (fast incremental), 'fixed' (fixed delay) */
+    scrollStrategy?: ScrollStrategy;
+    /** Scroll delay in ms (used for 'fixed' strategy, default: 800) */
+    scrollDelay?: number;
+    /** Maximum scroll iterations before giving up */
+    maxScrollIterations?: number;
+    /** Custom loading indicator selectors to wait for */
+    loadingIndicators?: string[];
+    /** Number of retries for retriable errors (network, timeout) */
+    retryCount?: number;
+    /** Delay between retries in ms */
+    retryDelay?: number;
+    /** Time to wait for DOM stability in ms (for 'adaptive' strategy) */
+    stabilityTimeout?: number;
+    /** Scroll step size in pixels for 'rapid' mode (default: 500) */
+    rapidScrollStep?: number;
+    /** Delay between rapid scroll steps in ms (default: 100) */
+    rapidScrollDelay?: number;
+}
 export interface ScraperConfig {
     name: string;
     startUrl: string;
@@ -125,6 +150,8 @@ export interface ScraperConfig {
     };
     itemContainer?: string;
     autoScroll?: boolean;
+    targetProducts?: number;
+    advanced?: AdvancedScraperConfig;
 }
 export interface ScrapedItem {
     [key: string]: string | null;
@@ -228,7 +255,7 @@ export interface Config {
         OriginalPrice?: string | string[];
     };
     pagination?: {
-        type: 'infinite_scroll' | 'url_pattern' | 'next_page';
+        type: 'infinite_scroll' | 'url_pattern' | 'next_page' | 'hybrid';
         pattern?: string;
         selector?: string;
         start_page?: number;
@@ -243,6 +270,12 @@ export interface Config {
     competitor_type?: 'local' | 'global';
     created_at?: string;
     updated_at?: string;
+    /** Lazy loading / scroll configuration */
+    lazyLoad?: LazyLoadConfig;
+    /** Target total items across all pages (0 = unlimited) */
+    targetItems?: number;
+    /** Item container selector for counting items */
+    itemContainer?: string;
 }
 export interface Schedule {
     id: number;
@@ -280,6 +313,7 @@ export interface BatchJob {
     startedAt?: number;
     completedAt?: number;
     results?: unknown[];
+    retryCount?: number;
 }
 export interface BatchCSVRow {
     Country: string;
@@ -307,7 +341,16 @@ export interface BatchProgress {
     running: number;
     itemsScraped: number;
 }
+export interface NextUrlEntry {
+    key: string;
+    url: string;
+    division: string;
+    category: string;
+    country: string;
+}
+export type NextScrapeStatus = 'pending' | 'running' | 'completed' | 'error';
 export interface Product {
+    id?: number;
     item_name: string;
     brand?: string;
     price?: number;
@@ -363,5 +406,58 @@ export interface DomainSummary {
     minPrice: number;
     maxPrice: number;
     countries: string[];
+}
+/** Pagination candidate found during auto-detection */
+export interface PaginationCandidate {
+    selector: string;
+    type: 'next_button' | 'numbered' | 'load_more';
+    text?: string;
+    confidence: number;
+    boundingBox: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    };
+    attributes?: {
+        href?: string;
+        ariaLabel?: string;
+        className?: string;
+    };
+}
+/** Payload for pagination:candidates response */
+export interface PaginationCandidatesPayload {
+    candidates: PaginationCandidate[];
+    detectedType: 'url_pattern' | 'next_page' | 'infinite_scroll' | 'hybrid' | null;
+}
+/** Scroll test update sent during active scroll test */
+export interface ScrollTestUpdate {
+    initialCount: number;
+    currentCount: number;
+    scrollPosition: number;
+    itemsLoaded: number[];
+}
+/** Results from completed scroll test with recommendations */
+export interface ScrollTestResult {
+    initialItemCount: number;
+    finalItemCount: number;
+    itemsLoadedPerScroll: number[];
+    totalScrollDistance: number;
+    scrollIterations: number;
+    avgLoadDelay: number;
+    recommendedStrategy: ScrollStrategy;
+    recommendedDelay: number;
+    recommendedMaxIterations: number;
+    loadingIndicatorsFound: string[];
+}
+/** Lazy loading configuration for saved configs */
+export interface LazyLoadConfig {
+    scrollStrategy?: ScrollStrategy;
+    scrollDelay?: number;
+    maxScrollIterations?: number;
+    stabilityTimeout?: number;
+    rapidScrollStep?: number;
+    rapidScrollDelay?: number;
+    loadingIndicators?: string[];
 }
 //# sourceMappingURL=types.d.ts.map

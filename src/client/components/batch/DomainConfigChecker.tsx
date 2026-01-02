@@ -12,23 +12,26 @@ interface DomainConfigCheckerProps {
 // Check if a config exists for the domain:country pair
 function findConfigForDomainCountry(domainCountry: string, configs: Map<string, Config>): Config | undefined {
   // domainCountry is in format "domain:country"
-  const [domain] = domainCountry.split(':');
+  const [domain, country] = domainCountry.split(':');
 
   // First try exact domain:country match
   if (configs.has(domainCountry)) {
     return configs.get(domainCountry);
   }
 
-  // Try domain-only match
-  if (configs.has(domain)) {
-    return configs.get(domain);
+  // Try domain-only match ONLY if that config has no country set
+  // (a country-specific config should NOT be used for other countries)
+  const domainConfig = configs.get(domain);
+  if (domainConfig && !domainConfig.country) {
+    return domainConfig;
   }
 
-  // Try fuzzy match by domain name
+  // Try fuzzy match by domain name - but only if no country or same country
   const domainBase = domain.replace(/^www\./i, '').split('.')[0].toLowerCase();
   for (const [key, cfg] of configs.entries()) {
-    if (cfg.name?.toLowerCase().includes(domainBase) ||
-        key.toLowerCase().includes(domainBase)) {
+    if ((cfg.name?.toLowerCase().includes(domainBase) ||
+        key.toLowerCase().includes(domainBase)) &&
+        (!cfg.country || cfg.country === country)) {
       return cfg;
     }
   }

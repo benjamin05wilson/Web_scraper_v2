@@ -182,8 +182,9 @@ export function BatchProvider({ children }: BatchProviderProps) {
               // Store by domain:country if country is set, otherwise just domain
               const key = config.country ? `${configDomain}:${config.country}` : configDomain;
               configMap.set(key, config);
-              // Also store by just domain as fallback
-              if (!configMap.has(configDomain)) {
+              // Only store by domain as fallback if config has NO country set
+              // (country-specific configs should NOT be used for other countries)
+              if (!config.country && !configMap.has(configDomain)) {
                 configMap.set(configDomain, config);
               }
             }
@@ -207,12 +208,13 @@ export function BatchProvider({ children }: BatchProviderProps) {
             const configDomain = extractDomain(config.url);
             // Store by domain:country if country is set
             const key = config.country ? `${configDomain}:${config.country}` : configDomain;
-            console.log(`[BatchContext] Config "${config.name}" -> key: ${key}`);
+            console.log(`[BatchContext] Config "${config.name}" -> key: ${key}, country: ${config.country || 'none'}`);
             if (!configMap.has(key)) {
               configMap.set(key, config);
             }
-            // Also store by just domain as fallback
-            if (!configMap.has(configDomain)) {
+            // Only store by domain as fallback if config has NO country set
+            // (country-specific configs should NOT be used for other countries)
+            if (!config.country && !configMap.has(configDomain)) {
               configMap.set(configDomain, config);
             }
           }
@@ -227,26 +229,28 @@ export function BatchProvider({ children }: BatchProviderProps) {
       console.log(`[BatchContext] Config map keys:`, [...configMap.keys()]);
       console.log(`[BatchContext] Checking domain:country pairs:`, domainCountryPairs);
 
-      // Find missing configs - check domain:country first, then fall back to domain only
+      // Find missing configs - check domain:country first, then fall back to domain only (if no country set)
       const missing = domainCountryPairs.filter(pair => {
-        const [domain, _country] = pair.split(':');
+        const [domain, country] = pair.split(':');
         // Check exact domain:country match first
         if (configMap.has(pair)) {
           console.log(`[BatchContext] "${pair}" -> exact match found`);
           return false;
         }
-        // Fall back to domain-only match
-        if (configMap.has(domain)) {
-          console.log(`[BatchContext] "${pair}" -> domain-only match found`);
+        // Fall back to domain-only match ONLY if that config has no country set
+        // (a country-specific config should NOT be used for other countries)
+        const domainConfig = configMap.get(domain);
+        if (domainConfig && !domainConfig.country) {
+          console.log(`[BatchContext] "${pair}" -> domain-only match found (generic config)`);
           return false;
         }
-        // Try fuzzy match by name
+        // Try fuzzy match by name - but only if the matched config has no country or same country
         const domainBase = domain.split('.')[0].toLowerCase();
-        const fuzzyMatch = [...configMap.values()].some(c =>
-          c.name?.toLowerCase().includes(domainBase)
+        const fuzzyMatch = [...configMap.values()].find(c =>
+          c.name?.toLowerCase().includes(domainBase) && (!c.country || c.country === country)
         );
         if (fuzzyMatch) {
-          console.log(`[BatchContext] "${pair}" -> fuzzy match found`);
+          console.log(`[BatchContext] "${pair}" -> fuzzy match found: ${fuzzyMatch.name}`);
           return false;
         }
         console.log(`[BatchContext] "${pair}" -> NO CONFIG FOUND`);
@@ -566,25 +570,28 @@ export function BatchProvider({ children }: BatchProviderProps) {
     // Get the config for this domain+country - use ref for immediate access (state may be stale)
     const currentConfigs = configsRef.current;
     const domainCountryKey = `${nextJob.domain}:${nextJob.country}`;
-    console.log(`[BatchContext] Looking for config, available keys:`, [...currentConfigs.keys()]);
+    console.log(`[BatchContext] Looking for config for ${domainCountryKey}, available keys:`, [...currentConfigs.keys()]);
 
     let config = currentConfigs.get(domainCountryKey);
     if (config) {
       console.log(`Found config for ${domainCountryKey} via exact domain:country match: ${config.name}`);
     }
     if (!config) {
-      // Try domain-only match
-      config = currentConfigs.get(nextJob.domain);
-      if (config) {
-        console.log(`Found config for ${nextJob.domain} via domain-only match: ${config.name}`);
+      // Try domain-only match ONLY if that config has no country set
+      // (a country-specific config should NOT be used for other countries)
+      const domainConfig = currentConfigs.get(nextJob.domain);
+      if (domainConfig && !domainConfig.country) {
+        config = domainConfig;
+        console.log(`Found config for ${nextJob.domain} via domain-only match (generic): ${config.name}`);
       }
     }
     if (!config) {
-      // Try to find by config name containing domain
+      // Try to find by config name containing domain - but only if no country or same country
       const domainBase = nextJob.domain.replace(/^www\./i, '').split('.')[0];
       for (const [key, cfg] of currentConfigs.entries()) {
-        if (cfg.name?.toLowerCase().includes(domainBase.toLowerCase()) ||
-            key.toLowerCase().includes(domainBase.toLowerCase())) {
+        if ((cfg.name?.toLowerCase().includes(domainBase.toLowerCase()) ||
+            key.toLowerCase().includes(domainBase.toLowerCase())) &&
+            (!cfg.country || cfg.country === nextJob.country)) {
           config = cfg;
           console.log(`Found config for ${nextJob.domain} via fuzzy match: ${cfg.name}`);
           break;

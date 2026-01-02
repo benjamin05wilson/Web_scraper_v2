@@ -16,6 +16,10 @@ import { InteractionRecorder } from './recorder/InteractionRecorder.js';
 import { ScrapingEngine } from './scraper/ScrapingEngine.js';
 import { WebRTCManager } from './streaming/WebRTCManager.js';
 import { scrapeNextUrlsFromList } from './scraper/NextScraper.js';
+import { PaginationDetector } from './scraper/PaginationDetector.js';
+import { ScrollTestHandler } from './scraper/ScrollTestHandler.js';
+import { PopupHandler } from './scraper/PopupHandler.js';
+import { NetworkInterceptor, type NetworkInterceptorConfig } from './scraper/handlers/NetworkInterceptor.js';
 
 import type {
   WSMessage,
@@ -24,6 +28,8 @@ import type {
   KeyboardEvent,
   ScrollEvent,
   ScraperConfig,
+  Config,
+  AdvancedScraperConfig,
 } from '../shared/types.js';
 
 const PORT = parseInt(process.env.PORT || '3002', 10);
@@ -46,6 +52,8 @@ interface ActiveSession {
   capturedUrls: Array<{ url: string; text?: string; title?: string; timestamp: number }>;
   lastHoveredUrl: string | null;
   lastUrlCheckTime: number;
+  scrollTestHandler?: ScrollTestHandler;
+  networkInterceptor?: NetworkInterceptor;
 }
 
 const sessions = new Map<string, ActiveSession>();
@@ -493,24 +501,33 @@ async function handleMessage(
       if (detected) {
         // Send as a selected element so the UI can use it
         send(ws, 'dom:selected', { element: detected }, session.id);
-        send(ws, 'dom:autoDetect', { success: true, element: detected }, session.id);
 
-        // Also call highlightSelected to show the overlay highlight
-        // Use the GENERIC selector (css) for highlighting, not cssSpecific
-        // This ensures the highlight matches what will be extracted
-        // The generic selector finds the FIRST matching element, which is what extraction uses
+        // Capture screenshot of the detected element
+        let screenshotBase64: string | null = null;
         const highlightSelector = detected.css;
         if (highlightSelector) {
-          // Wait 600ms for smooth scroll to complete before highlighting
-          setTimeout(async () => {
-            console.log('[Server] Calling highlightSelected for auto-detected element:', highlightSelector);
-            try {
-              await session.inspector.highlightSelected(highlightSelector);
-            } catch (err) {
-              console.log('[Server] highlightSelected failed:', err);
+          try {
+            // Highlight and scroll to element first
+            await session.inspector.highlightSelected(highlightSelector);
+            await session.browserSession.page.waitForTimeout(300);
+
+            // Take screenshot of the element
+            const element = await session.browserSession.page.$(highlightSelector);
+            if (element) {
+              const screenshotBuffer = await element.screenshot({ type: 'png' });
+              screenshotBase64 = `data:image/png;base64,${screenshotBuffer.toString('base64')}`;
+              console.log('[Server] Captured product element screenshot');
             }
-          }, 600);
+          } catch (err) {
+            console.log('[Server] Screenshot capture failed:', err);
+          }
         }
+
+        send(ws, 'dom:autoDetect', {
+          success: true,
+          element: detected,
+          screenshot: screenshotBase64,
+        }, session.id);
       } else {
         send(ws, 'dom:autoDetect', { success: false, error: 'No product found' }, session.id);
       }
@@ -710,6 +727,80 @@ async function handleMessage(
             }
           }
 
+          // Build advanced config from lazyLoad settings if present
+          const typedSavedConfig = savedConfig as Config;
+          let advancedConfig: AdvancedScraperConfig | undefined;
+          if (typedSavedConfig.lazyLoad) {
+            advancedConfig = {
+              scrollStrategy: typedSavedConfig.lazyLoad.scrollStrategy,
+              scrollDelay: typedSavedConfig.lazyLoad.scrollDelay,
+              maxScrollIterations: typedSavedConfig.lazyLoad.maxScrollIterations,
+              stabilityTimeout: typedSavedConfig.lazyLoad.stabilityTimeout,
+              rapidScrollStep: typedSavedConfig.lazyLoad.rapidScrollStep,
+              rapidScrollDelay: typedSavedConfig.lazyLoad.rapidScrollDelay,
+              loadingIndicators: typedSavedConfig.lazyLoad.loadingIndicators,
+            };
+            console.log(`[Server] Applied lazyLoad settings: ${JSON.stringify(advancedConfig)}`);
+          }
+
+          // Convert dismiss_actions to preActions format for ScrapingEngine
+          let preActions: ScraperConfig['preActions'] | undefined;
+          if (savedConfig.dismiss_actions && Array.isArray(savedConfig.dismiss_actions) && savedConfig.dismiss_actions.length > 0) {
+            preActions = {
+              id: 'dismiss-actions',
+              name: 'Dismiss Popups',
+              createdAt: Date.now(),
+              actions: savedConfig.dismiss_actions.map((action: any, idx: number) => ({
+                id: `dismiss-${idx}`,
+                type: 'click' as const,
+                selector: action.selector,
+                description: `Click ${action.selector}`,
+                timestamp: action.timestamp || Date.now(),
+              })),
+            };
+            console.log(`[Server] Converted ${savedConfig.dismiss_actions.length} dismiss actions to preActions`);
+          }
+
+          // Build pagination config based on saved pagination data
+          let paginationConfig: ScraperConfig['pagination'] | undefined;
+          let scrollPositions: number[] | undefined;
+
+          if (savedConfig.pagination) {
+            const paginationType = savedConfig.pagination.type;
+            // For infinite_scroll, we don't need a selector - just enable auto-scroll
+            if (paginationType === 'infinite_scroll') {
+              // Infinite scroll is handled by autoScroll
+              // If we have recorded scroll positions, use them
+              if (savedConfig.pagination.scrollPositions && savedConfig.pagination.scrollPositions.length > 0) {
+                scrollPositions = savedConfig.pagination.scrollPositions as number[];
+                console.log(`[Server] Pagination type: infinite_scroll with ${scrollPositions!.length} recorded scroll positions`);
+              } else {
+                console.log(`[Server] Pagination type: infinite_scroll - using auto-scroll`);
+              }
+            } else if (paginationType === 'next_page' || paginationType === 'url_pattern') {
+              paginationConfig = {
+                enabled: true,
+                type: paginationType,
+                selector: savedConfig.pagination.selector || '',
+                pattern: savedConfig.pagination.pattern,
+                offset: savedConfig.pagination.offset,
+                maxPages: savedConfig.pagination.max_pages || 10,
+                waitAfterClick: 1000,
+              };
+              console.log(`[Server] Pagination type: ${paginationType}, selector: ${paginationConfig.selector || 'N/A'}`);
+              if (paginationConfig.offset) {
+                console.log(`[Server] Offset config: key=${paginationConfig.offset.key}, start=${paginationConfig.offset.start}, increment=${paginationConfig.offset.increment}`);
+              }
+            }
+          }
+
+          // Add scroll positions to advanced config if available
+          if (scrollPositions && advancedConfig) {
+            (advancedConfig as any).scrollPositions = scrollPositions;
+          } else if (scrollPositions) {
+            advancedConfig = { scrollPositions } as any;
+          }
+
           // If the saved config already has selectors in the correct format (AssignedSelector[]), use them
           if (Array.isArray(savedConfig.selectors)) {
             config = {
@@ -717,23 +808,23 @@ async function handleMessage(
               name: requestConfig.name,
               startUrl: requestConfig.url || requestConfig.startUrl || savedConfig.startUrl || savedConfig.url || session.browserSession.page.url(),
               selectors: savedConfig.selectors,
-              itemContainer: savedConfig.itemContainer,
-              targetProducts: requestConfig.targetProducts || 0, // Pass target from request
+              preActions,
+              pagination: paginationConfig,
+              itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
+              targetProducts: requestConfig.targetProducts || typedSavedConfig.targetItems || 0,
+              advanced: advancedConfig,
             };
           } else {
             config = {
               name: requestConfig.name,
               startUrl: requestConfig.url || requestConfig.startUrl || savedConfig.startUrl || savedConfig.url || session.browserSession.page.url(),
               selectors: convertedSelectors,
-              pagination: savedConfig.pagination ? {
-                enabled: true,
-                selector: savedConfig.pagination.selector || '',
-                maxPages: savedConfig.pagination.max_pages || 1,
-                waitAfterClick: 1000,
-              } : undefined,
-              itemContainer: savedConfig.itemContainer,
+              preActions,
+              pagination: paginationConfig,
+              itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
               autoScroll: savedConfig.autoScroll !== false,
-              targetProducts: requestConfig.targetProducts || 0, // Pass target from request
+              targetProducts: requestConfig.targetProducts || typedSavedConfig.targetItems || 0,
+              advanced: advancedConfig,
             };
           }
 
@@ -865,6 +956,297 @@ async function handleMessage(
           error: error instanceof Error ? error.message : 'Extraction failed',
         }, session.id);
       }
+      break;
+    }
+
+    // =========================================================================
+    // PAGINATION DETECTION
+    // =========================================================================
+
+    case 'pagination:detect': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      console.log('[Server] Detecting pagination candidates...');
+      try {
+        const detector = new PaginationDetector(session.browserSession.page);
+        const candidates = await detector.detectCandidates();
+        console.log(`[Server] Found ${candidates.length} pagination candidates`);
+
+        // Determine detected type based on candidates
+        let detectedType: 'url_pattern' | 'next_page' | 'infinite_scroll' | null = null;
+        if (candidates.length > 0) {
+          const topCandidate = candidates[0];
+          if (topCandidate.type === 'load_more') {
+            detectedType = 'infinite_scroll';
+          } else if (topCandidate.type === 'numbered' && topCandidate.attributes?.href) {
+            detectedType = 'url_pattern';
+          } else {
+            detectedType = 'next_page';
+          }
+        }
+
+        send(ws, 'pagination:candidates', { candidates, detectedType }, session.id);
+      } catch (error) {
+        console.error('[Server] Pagination detection failed:', error);
+        send(ws, 'pagination:candidates', { candidates: [], detectedType: null, error: String(error) }, session.id);
+      }
+      break;
+    }
+
+    // Background pagination detection for automated builder flow
+    // Tests both pagination clicks and infinite scroll, returns best method
+    case 'pagination:autoStart': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { itemSelector } = (payload as { itemSelector?: string }) || {};
+      console.log('[Server] Starting smart pagination detection...');
+
+      // Run smart detection - tests both methods and picks best
+      const detector = new PaginationDetector(session.browserSession.page);
+      detector.detectBestMethod(itemSelector)
+        .then(result => {
+          console.log(`[Server] Smart detection complete: method=${result.method}`);
+
+          // Build pagination pattern for config
+          let paginationPattern: {
+            type: 'url_pattern' | 'next_page' | 'infinite_scroll';
+            selector?: string;
+            scrollPositions?: number[];
+            productsPerPage?: number;
+            offset?: {
+              key: string;
+              start: number;
+              increment: number;
+            };
+          } | null = null;
+
+          if (result.method === 'pagination' && result.pagination) {
+            paginationPattern = {
+              type: result.pagination.type,
+              selector: result.pagination.selector,
+              productsPerPage: result.pagination.productsLoaded,
+            };
+            // Include offset info if detected
+            if (result.pagination.offset) {
+              paginationPattern.offset = {
+                key: result.pagination.offset.key,
+                start: result.pagination.offset.start,
+                increment: result.pagination.offset.increment,
+              };
+              console.log(`[Server] Detected offset pattern: ${result.pagination.offset.key}=${result.pagination.offset.start} (increment: ${result.pagination.offset.increment})`);
+            }
+          } else if (result.method === 'infinite_scroll' && result.scroll) {
+            paginationPattern = {
+              type: 'infinite_scroll',
+              scrollPositions: result.scroll.scrollPositions,
+              productsPerPage: result.scroll.productsLoaded,
+            };
+          }
+
+          send(ws, 'pagination:result', {
+            candidates: result.candidates,
+            success: true,
+            method: result.method,
+            pagination: paginationPattern,
+            hasInfiniteScroll: result.method === 'infinite_scroll',
+          }, session.id);
+        })
+        .catch(error => {
+          console.error('[Server] Smart pagination detection failed:', error);
+          send(ws, 'pagination:result', { candidates: [], success: false, error: String(error) }, session.id);
+        });
+
+      // Immediately acknowledge the start
+      send(ws, 'pagination:autoStart', { started: true }, session.id);
+      break;
+    }
+
+    // =========================================================================
+    // POPUP AUTO-CLOSE
+    // =========================================================================
+
+    case 'popup:autoClose': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      console.log('[Server] Auto-closing popups...');
+
+      try {
+        const handler = new PopupHandler(session.browserSession.page);
+        const result = await handler.autoClosePopups();
+
+        console.log(`[Server] Popup auto-close complete: ${result.closed.length} closed, ${result.remaining} remaining`);
+
+        // Convert closed results to dismiss actions format
+        const dismissActions = result.closed
+          .filter(c => c.success)
+          .map(c => ({
+            selector: c.selector,
+            text: c.text,
+          }));
+
+        send(ws, 'popup:closed', {
+          success: true,
+          found: result.found,
+          closed: result.closed.length,
+          remaining: result.remaining,
+          dismissActions,
+        }, session.id);
+      } catch (error) {
+        console.error('[Server] Popup auto-close failed:', error);
+        send(ws, 'popup:closed', {
+          success: false,
+          error: String(error),
+          found: 0,
+          closed: 0,
+          remaining: 0,
+          dismissActions: [],
+        }, session.id);
+      }
+      break;
+    }
+
+    // =========================================================================
+    // SCROLL TEST
+    // =========================================================================
+
+    case 'scrollTest:start': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { itemSelector } = payload as { itemSelector: string };
+      console.log(`[Server] Starting scroll test with item selector: ${itemSelector}`);
+
+      try {
+        const handler = new ScrollTestHandler(session.browserSession.page, itemSelector);
+        await handler.startTest();
+        session.scrollTestHandler = handler;
+        send(ws, 'scrollTest:start', { started: true }, session.id);
+      } catch (error) {
+        console.error('[Server] Scroll test start failed:', error);
+        send(ws, 'scrollTest:start', { started: false, error: String(error) }, session.id);
+      }
+      break;
+    }
+
+    case 'scrollTest:update': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session || !session.scrollTestHandler) return;
+
+      try {
+        const update = await session.scrollTestHandler.getTestUpdate();
+        send(ws, 'scrollTest:update', update, session.id);
+      } catch (error) {
+        console.error('[Server] Scroll test update failed:', error);
+      }
+      break;
+    }
+
+    case 'scrollTest:complete': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session || !session.scrollTestHandler) {
+        send(ws, 'scrollTest:result', { error: 'No scroll test in progress' }, session?.id);
+        return;
+      }
+
+      try {
+        const result = await session.scrollTestHandler.finishTest();
+        session.scrollTestHandler = undefined;
+        send(ws, 'scrollTest:result', result, session.id);
+      } catch (error) {
+        console.error('[Server] Scroll test finish failed:', error);
+        send(ws, 'scrollTest:result', { error: String(error) }, session.id);
+      }
+      break;
+    }
+
+    // =========================================================================
+    // NETWORK INTERCEPTION (for virtual scroll / XHR product extraction)
+    // =========================================================================
+
+    case 'network:startCapture': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const config = payload as NetworkInterceptorConfig | { autoDetect?: boolean };
+
+      console.log('[Server] Starting network capture...');
+
+      try {
+        // Create network interceptor
+        const interceptor = new NetworkInterceptor(
+          session.browserSession.page,
+          'autoDetect' in config && config.autoDetect
+            ? { urlPatterns: [] } // Empty patterns = auto-detect mode
+            : (config as NetworkInterceptorConfig)
+        );
+
+        // Start listening
+        if ('autoDetect' in config && config.autoDetect) {
+          await interceptor.startAutoDetect();
+          console.log('[Server] Network capture started in auto-detect mode');
+        } else {
+          await interceptor.startListening();
+          console.log('[Server] Network capture started with patterns:', (config as NetworkInterceptorConfig).urlPatterns);
+        }
+
+        session.networkInterceptor = interceptor;
+
+        send(ws, 'network:startCapture', { success: true }, session.id);
+      } catch (error) {
+        console.error('[Server] Network capture start failed:', error);
+        send(ws, 'network:startCapture', { success: false, error: String(error) }, session.id);
+      }
+      break;
+    }
+
+    case 'network:stopCapture': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session || !session.networkInterceptor) {
+        send(ws, 'network:stopCapture', { success: false, error: 'No capture in progress' }, session?.id);
+        return;
+      }
+
+      console.log('[Server] Stopping network capture...');
+
+      try {
+        // Check if we were in auto-detect mode
+        const detectedPatterns = session.networkInterceptor.stopAutoDetect();
+        session.networkInterceptor.stopListening();
+
+        const products = session.networkInterceptor.getProducts();
+        console.log(`[Server] Network capture stopped. Products: ${products.length}, Patterns: ${detectedPatterns.length}`);
+
+        // Send detected patterns if any
+        if (detectedPatterns.length > 0) {
+          send(ws, 'network:patternDetected', { patterns: detectedPatterns }, session.id);
+        }
+
+        send(ws, 'network:stopCapture', {
+          success: true,
+          productCount: products.length,
+          patternCount: detectedPatterns.length,
+        }, session.id);
+      } catch (error) {
+        console.error('[Server] Network capture stop failed:', error);
+        send(ws, 'network:stopCapture', { success: false, error: String(error) }, session.id);
+      }
+      break;
+    }
+
+    case 'network:getProducts': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session || !session.networkInterceptor) {
+        send(ws, 'network:products', { products: [], error: 'No capture in progress' }, session?.id);
+        return;
+      }
+
+      const products = session.networkInterceptor.getProducts();
+      console.log(`[Server] Returning ${products.length} captured products`);
+
+      send(ws, 'network:products', { products }, session.id);
       break;
     }
 

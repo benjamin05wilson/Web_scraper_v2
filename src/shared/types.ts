@@ -41,7 +41,23 @@ export type WSMessageType =
   | 'url:captured'
   | 'url:history'
   | 'container:extract'
-  | 'container:content';
+  | 'container:content'
+  | 'pagination:detect'
+  | 'pagination:candidates'
+  | 'pagination:autoStart'
+  | 'pagination:result'
+  | 'popup:autoClose'
+  | 'popup:closed'
+  | 'scrollTest:start'
+  | 'scrollTest:update'
+  | 'scrollTest:complete'
+  | 'scrollTest:result'
+  | 'network:startCapture'
+  | 'network:stopCapture'
+  | 'network:productCaptured'
+  | 'network:patternDetected'
+  | 'network:getProducts'
+  | 'network:products';
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;
@@ -179,6 +195,40 @@ export interface RecorderSequence {
   createdAt: number;
 }
 
+/** Scroll strategy for lazy loading */
+export type ScrollStrategy = 'adaptive' | 'rapid' | 'fixed';
+
+// Advanced Scraper Configuration Options
+export interface AdvancedScraperConfig {
+  /** Scroll strategy: 'adaptive' (wait for DOM stability), 'rapid' (fast incremental), 'fixed' (fixed delay) */
+  scrollStrategy?: ScrollStrategy;
+  /** Scroll delay in ms (used for 'fixed' strategy, default: 800) */
+  scrollDelay?: number;
+  /** Maximum scroll iterations before giving up */
+  maxScrollIterations?: number;
+  /** Custom loading indicator selectors to wait for */
+  loadingIndicators?: string[];
+  /** Number of retries for retriable errors (network, timeout) */
+  retryCount?: number;
+  /** Delay between retries in ms */
+  retryDelay?: number;
+  /** Time to wait for DOM stability in ms (for 'adaptive' strategy) */
+  stabilityTimeout?: number;
+  /** Scroll step size in pixels for 'rapid' mode (default: 500) */
+  rapidScrollStep?: number;
+  /** Delay between rapid scroll steps in ms (default: 100) */
+  rapidScrollDelay?: number;
+  /** Recorded scroll Y positions where new items loaded (for infinite scroll replay) */
+  scrollPositions?: number[];
+}
+
+/** Offset configuration for URL-based pagination */
+export interface OffsetConfig {
+  key: string;      // URL parameter key (e.g., 'o', 'offset', 'start')
+  start: number;    // Starting value (usually 0)
+  increment: number; // How much to add per page (e.g., 24)
+}
+
 // Scraper Configuration
 export interface ScraperConfig {
   name: string;
@@ -187,13 +237,17 @@ export interface ScraperConfig {
   preActions?: RecorderSequence; // Actions to run before scraping (popups, cookies)
   pagination?: {
     enabled: boolean;
-    selector: string;
+    type?: 'url_pattern' | 'next_page' | 'infinite_scroll' | 'hybrid'; // Pagination type (hybrid = scroll + click)
+    selector?: string; // For next_page/infinite_scroll - CSS selector to click
+    pattern?: string; // For url_pattern - URL pattern with {page} or {offset}
+    offset?: OffsetConfig; // For url_pattern with offset-based pagination
     maxPages: number;
     waitAfterClick?: number;
   };
   itemContainer?: string; // Selector for repeating item containers
   autoScroll?: boolean; // Auto-scroll to load lazy content before scraping (default: true)
   targetProducts?: number; // Max products to scrape - stops when target reached (0 = unlimited)
+  advanced?: AdvancedScraperConfig; // Advanced options for fine-tuning scraping behavior
 }
 
 // Scraper Results
@@ -343,11 +397,13 @@ export interface Config {
     OriginalPrice?: string | string[];
   };
   pagination?: {
-    type: 'infinite_scroll' | 'url_pattern' | 'next_page';
+    type: 'infinite_scroll' | 'url_pattern' | 'next_page' | 'hybrid';
     pattern?: string;
     selector?: string;
     start_page?: number;
     max_pages?: number;
+    offset?: OffsetConfig; // For url_pattern with offset-based pagination
+    productsPerPage?: number; // Estimated products per page for progress calculation
   };
   alignment?: {
     matched: boolean;
@@ -358,6 +414,14 @@ export interface Config {
   competitor_type?: 'local' | 'global';
   created_at?: string;
   updated_at?: string;
+  /** Lazy loading / scroll configuration */
+  lazyLoad?: LazyLoadConfig;
+  /** Target total items across all pages (0 = unlimited) */
+  targetItems?: number;
+  /** Item container selector for counting items */
+  itemContainer?: string;
+  /** Network-based extraction config (for virtual scroll sites) */
+  networkExtraction?: NetworkExtractionConfig;
 }
 
 // ============================================================================
@@ -527,4 +591,120 @@ export interface DomainSummary {
   minPrice: number;
   maxPrice: number;
   countries: string[];
+}
+
+// ============================================================================
+// PAGINATION & LAZY LOADING TYPES
+// ============================================================================
+
+/** Pagination candidate found during auto-detection */
+export interface PaginationCandidate {
+  selector: string;
+  type: 'next_button' | 'numbered' | 'load_more';
+  text?: string;
+  confidence: number;
+  boundingBox: { x: number; y: number; width: number; height: number };
+  attributes?: {
+    href?: string;
+    ariaLabel?: string;
+    className?: string;
+  };
+}
+
+/** Payload for pagination:candidates response */
+export interface PaginationCandidatesPayload {
+  candidates: PaginationCandidate[];
+  detectedType: 'url_pattern' | 'next_page' | 'infinite_scroll' | 'hybrid' | null;
+}
+
+/** Scroll test update sent during active scroll test */
+export interface ScrollTestUpdate {
+  initialCount: number;
+  currentCount: number;
+  scrollPosition: number;
+  itemsLoaded: number[];
+}
+
+/** Results from completed scroll test with recommendations */
+export interface ScrollTestResult {
+  initialItemCount: number;
+  finalItemCount: number;
+  itemsLoadedPerScroll: number[];
+  totalScrollDistance: number;
+  scrollIterations: number;
+  avgLoadDelay: number;
+  recommendedStrategy: ScrollStrategy;
+  recommendedDelay: number;
+  recommendedMaxIterations: number;
+  loadingIndicatorsFound: string[];
+}
+
+/** Lazy loading configuration for saved configs */
+export interface LazyLoadConfig {
+  scrollStrategy?: ScrollStrategy;
+  scrollDelay?: number;
+  maxScrollIterations?: number;
+  stabilityTimeout?: number;
+  rapidScrollStep?: number;
+  rapidScrollDelay?: number;
+  loadingIndicators?: string[];
+}
+
+// ============================================================================
+// NETWORK EXTRACTION TYPES - For XHR/fetch interception
+// ============================================================================
+
+/** Field mappings from JSON response to standard product fields */
+export interface NetworkFieldMappings {
+  id?: string;      // JSON path to ID field
+  title?: string;   // JSON path to title
+  price?: string;   // JSON path to price
+  url?: string;     // JSON path to URL
+  image?: string;   // JSON path to image
+}
+
+/** Configuration for network-based product extraction */
+export interface NetworkExtractionConfig {
+  /** Enable network extraction mode */
+  enabled: boolean;
+  /** URL patterns to intercept (substring or regex) */
+  urlPatterns: string[];
+  /** JSON path to product data in response (e.g., "data.products" or "tile") */
+  dataPath?: string;
+  /** Field mappings from JSON to standard product fields */
+  fieldMappings?: NetworkFieldMappings;
+}
+
+/** Product data extracted from intercepted network requests */
+export interface InterceptedProduct {
+  id: string;
+  title?: string;
+  price?: string;
+  url?: string;
+  image?: string;
+  raw: Record<string, unknown>; // Full JSON for custom extraction
+}
+
+/** Auto-detected API pattern */
+export interface DetectedApiPattern {
+  pattern: string;
+  sampleData: Record<string, unknown>;
+  confidence: number;
+  suggestedMappings: NetworkFieldMappings;
+}
+
+/** Payload for network:productCaptured message */
+export interface NetworkProductCapturedPayload {
+  product: InterceptedProduct;
+  totalCount: number;
+}
+
+/** Payload for network:patternDetected message */
+export interface NetworkPatternDetectedPayload {
+  patterns: DetectedApiPattern[];
+}
+
+/** Payload for network:products message */
+export interface NetworkProductsPayload {
+  products: InterceptedProduct[];
 }
