@@ -2,6 +2,9 @@
 // MAIN SERVER - WebSocket + Express + WebRTC Signaling
 // ============================================================================
 
+// Load environment variables from .env file
+import 'dotenv/config';
+
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -20,6 +23,7 @@ import { PaginationDetector } from './scraper/PaginationDetector.js';
 import { ScrollTestHandler } from './scraper/ScrollTestHandler.js';
 import { PopupHandler } from './scraper/PopupHandler.js';
 import { NetworkInterceptor, type NetworkInterceptorConfig } from './scraper/handlers/NetworkInterceptor.js';
+import { getGeminiService } from './ai/GeminiService.js';
 
 import type {
   WSMessage,
@@ -70,6 +74,16 @@ app.use(express.json());
 // Health check
 app.get('/health', (_, res) => {
   res.json({ status: 'ok', sessions: sessions.size });
+});
+
+// AI status endpoint
+app.get('/api/ai/status', (_, res) => {
+  const gemini = getGeminiService();
+  res.json({
+    enabled: gemini.isEnabled,
+    model: 'gemini-2.0-flash',
+    rateLimitRemaining: gemini.getRateLimitRemaining(),
+  });
 });
 
 // API endpoints for scraper configs
@@ -494,8 +508,13 @@ async function handleMessage(
       }
       (session as any)._autoDetecting = true;
 
-      console.log('[Server] Auto-detecting product...');
-      const detected = await session.inspector.autoDetectProduct();
+      // Use AI-enhanced detection if available
+      const gemini = getGeminiService();
+      console.log(`[Server] Auto-detecting product (AI ${gemini.isEnabled ? 'enabled' : 'disabled'})...`);
+
+      const detected = gemini.isEnabled
+        ? await session.inspector.autoDetectProductWithAI()
+        : await session.inspector.autoDetectProduct();
       (session as any)._autoDetecting = false;
 
       if (detected) {
@@ -1001,11 +1020,18 @@ async function handleMessage(
       if (!session) return;
 
       const { itemSelector } = (payload as { itemSelector?: string }) || {};
-      console.log('[Server] Starting smart pagination detection...');
+
+      // Use AI-enhanced detection if available
+      const geminiForPagination = getGeminiService();
+      console.log(`[Server] Starting smart pagination detection (AI ${geminiForPagination.isEnabled ? 'enabled' : 'disabled'})...`);
 
       // Run smart detection - tests both methods and picks best
       const detector = new PaginationDetector(session.browserSession.page);
-      detector.detectBestMethod(itemSelector)
+      const detectMethod = geminiForPagination.isEnabled
+        ? detector.detectBestMethodWithAI(itemSelector)
+        : detector.detectBestMethod(itemSelector);
+
+      detectMethod
         .then(result => {
           console.log(`[Server] Smart detection complete: method=${result.method}`);
 
@@ -1071,11 +1097,15 @@ async function handleMessage(
       const session = getSession(sessionId || getSessionId());
       if (!session) return;
 
-      console.log('[Server] Auto-closing popups...');
+      // Use AI-enhanced detection if available
+      const geminiForPopups = getGeminiService();
+      console.log(`[Server] Auto-closing popups (AI ${geminiForPopups.isEnabled ? 'enabled' : 'disabled'})...`);
 
       try {
         const handler = new PopupHandler(session.browserSession.page);
-        const result = await handler.autoClosePopups();
+        const result = geminiForPopups.isEnabled
+          ? await handler.autoClosePopupsWithAI()
+          : await handler.autoClosePopups();
 
         console.log(`[Server] Popup auto-close complete: ${result.closed.length} closed, ${result.remaining} remaining`);
 
@@ -1103,6 +1133,79 @@ async function handleMessage(
           closed: 0,
           remaining: 0,
           dismissActions: [],
+        }, session.id);
+      }
+      break;
+    }
+
+    // =========================================================================
+    // FIELD AUTO-LABELING (AI)
+    // =========================================================================
+
+    case 'fields:autoLabel': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const geminiForLabels = getGeminiService();
+      if (!geminiForLabels.isEnabled) {
+        send(ws, 'fields:labeled', {
+          success: false,
+          error: 'Gemini API not enabled',
+          labels: [],
+        }, session.id);
+        break;
+      }
+
+      const { extractedItems, productSelector } = payload as {
+        extractedItems: Array<{ index: number; type: 'text' | 'link' | 'image'; content: string; selector?: string }>;
+        productSelector?: string;
+      };
+
+      console.log(`[Server] Auto-labeling ${extractedItems.length} fields with AI...`);
+
+      try {
+        // Take screenshot of product card if selector provided
+        let screenshotBase64 = '';
+        if (productSelector) {
+          try {
+            const element = await session.browserSession.page.$(productSelector);
+            if (element) {
+              const screenshotBuffer = await element.screenshot({ type: 'png' });
+              screenshotBase64 = screenshotBuffer.toString('base64');
+            }
+          } catch (e) {
+            // Fall back to full page screenshot
+            const screenshotBuffer = await session.browserSession.page.screenshot({ type: 'png' });
+            screenshotBase64 = screenshotBuffer.toString('base64');
+          }
+        } else {
+          const screenshotBuffer = await session.browserSession.page.screenshot({ type: 'png' });
+          screenshotBase64 = screenshotBuffer.toString('base64');
+        }
+
+        // Call Gemini for labeling
+        const result = await geminiForLabels.labelFields(extractedItems, screenshotBase64);
+
+        if (result.success && result.data) {
+          console.log(`[Server] AI labeled ${result.data.labels.length} fields (latency: ${result.latencyMs}ms)`);
+          send(ws, 'fields:labeled', {
+            success: true,
+            labels: result.data.labels,
+            latencyMs: result.latencyMs,
+          }, session.id);
+        } else {
+          send(ws, 'fields:labeled', {
+            success: false,
+            error: result.error || 'AI labeling failed',
+            labels: [],
+          }, session.id);
+        }
+      } catch (error) {
+        console.error('[Server] Field auto-labeling failed:', error);
+        send(ws, 'fields:labeled', {
+          success: false,
+          error: String(error),
+          labels: [],
         }, session.id);
       }
       break;

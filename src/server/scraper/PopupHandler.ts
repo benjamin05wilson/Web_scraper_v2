@@ -3,6 +3,7 @@
 // ============================================================================
 
 import type { Page } from 'playwright';
+import { getGeminiService } from '../ai/GeminiService.js';
 
 export interface PopupCloseResult {
   selector: string;
@@ -14,6 +15,7 @@ export interface PopupDetectionResult {
   found: number;
   closed: PopupCloseResult[];
   remaining: number;
+  source?: 'ai' | 'pattern';
 }
 
 // Common popup/modal selectors to look for
@@ -197,7 +199,190 @@ export class PopupHandler {
 
     console.log(`[PopupHandler] Found: ${found}, Closed: ${closed.filter(c => c.success).length}, Remaining: ${remaining}`);
 
-    return { found, closed, remaining };
+    return { found, closed, remaining, source: 'pattern' };
+  }
+
+  /**
+   * AI-enhanced popup detection and closing using Gemini Vision
+   * Falls back to pattern-based detection if AI fails
+   */
+  async autoClosePopupsWithAI(): Promise<PopupDetectionResult> {
+    const gemini = getGeminiService();
+
+    if (!gemini.isEnabled) {
+      console.log('[PopupHandler] Gemini not enabled, using pattern-based detection');
+      return this.autoClosePopups();
+    }
+
+    console.log('[PopupHandler] Starting AI-enhanced popup detection...');
+
+    try {
+      // Take screenshot for AI analysis
+      const screenshotBuffer = await this.page.screenshot({ type: 'png' });
+      const screenshotBase64 = screenshotBuffer.toString('base64');
+
+      // Call Gemini for popup detection
+      const result = await gemini.detectPopups(screenshotBase64);
+
+      if (!result.success || !result.data) {
+        console.log(`[PopupHandler] AI detection failed: ${result.error}, falling back to pattern detection`);
+        return this.autoClosePopups();
+      }
+
+      const aiResult = result.data;
+      console.log(`[PopupHandler] AI detected ${aiResult.popups.length} popups (latency: ${result.latencyMs}ms)`);
+
+      if (!aiResult.popups_found || aiResult.popups.length === 0) {
+        // AI found no popups, but double-check with pattern detection
+        const patternResult = await this.autoClosePopups();
+        if (patternResult.found > 0) {
+          return patternResult;
+        }
+        return { found: 0, closed: [], remaining: 0, source: 'ai' };
+      }
+
+      // Process each popup found by AI
+      const closed: PopupCloseResult[] = [];
+      let found = aiResult.popups.length;
+
+      for (const popup of aiResult.popups) {
+        console.log(`[PopupHandler] Processing ${popup.type} popup: "${popup.button_text}"`);
+
+        try {
+          let clicked = false;
+
+          // Strategy 1: Find button by text ONLY within popup/modal containers
+          if (popup.button_text) {
+            const buttonText = popup.button_text.trim();
+
+            // Search for buttons with matching text inside popup containers
+            const popupContainerSelectors = [
+              '[class*="cookie"]',
+              '[class*="consent"]',
+              '[class*="modal"]',
+              '[class*="overlay"]',
+              '[class*="popup"]',
+              '[class*="dialog"]',
+              '[class*="banner"]',
+              '[role="dialog"]',
+              '[role="alertdialog"]',
+              '[class*="gdpr"]',
+              '[class*="notice"]',
+            ];
+
+            for (const containerSelector of popupContainerSelectors) {
+              if (clicked) break;
+
+              try {
+                // Find buttons inside popup containers
+                const buttons = await this.page.$$(`${containerSelector} button, ${containerSelector} a, ${containerSelector} [role="button"]`);
+
+                for (const button of buttons) {
+                  if (clicked) break;
+
+                  const isVisible = await button.isVisible().catch(() => false);
+                  if (!isVisible) continue;
+
+                  const text = await button.textContent().catch(() => '');
+                  const ariaLabel = await button.getAttribute('aria-label').catch(() => '');
+                  const combinedText = `${text} ${ariaLabel}`.toLowerCase().trim();
+                  const searchText = buttonText.toLowerCase();
+
+                  // Check if button text matches what AI found
+                  if (combinedText.includes(searchText) || searchText.includes(combinedText.substring(0, 10))) {
+                    await button.click({ timeout: 3000 });
+                    clicked = true;
+                    closed.push({ selector: `${containerSelector} text="${buttonText}"`, text: buttonText, success: true });
+                    console.log(`[PopupHandler] AI: Closed "${buttonText}" in ${containerSelector}`);
+                  }
+                }
+              } catch {
+                // Container not found, continue
+              }
+            }
+
+            // Strategy 2: If not found in containers, try exact text match but verify it's in a popup context
+            if (!clicked) {
+              const exactButton = await this.page.$(`button:has-text("${buttonText}"), a:has-text("${buttonText}"), [role="button"]:has-text("${buttonText}")`);
+              if (exactButton && await exactButton.isVisible()) {
+                // Verify this button is inside a popup-like container
+                const isInPopup = await exactButton.evaluate((el) => {
+                  let parent = el.parentElement;
+                  while (parent) {
+                    const classes = parent.className?.toLowerCase() || '';
+                    const role = parent.getAttribute('role');
+                    if (
+                      classes.includes('modal') ||
+                      classes.includes('overlay') ||
+                      classes.includes('popup') ||
+                      classes.includes('dialog') ||
+                      classes.includes('cookie') ||
+                      classes.includes('consent') ||
+                      classes.includes('banner') ||
+                      classes.includes('gdpr') ||
+                      classes.includes('notice') ||
+                      role === 'dialog' ||
+                      role === 'alertdialog'
+                    ) {
+                      return true;
+                    }
+                    parent = parent.parentElement;
+                  }
+                  return false;
+                }).catch(() => false);
+
+                if (isInPopup) {
+                  await exactButton.click({ timeout: 3000 });
+                  clicked = true;
+                  closed.push({ selector: `text="${buttonText}"`, text: buttonText, success: true });
+                  console.log(`[PopupHandler] AI: Closed by verified text "${buttonText}"`);
+                } else {
+                  console.log(`[PopupHandler] AI: Skipping "${buttonText}" - not inside popup container`);
+                }
+              }
+            }
+          }
+
+          // Strategy 3: Press Escape for dialogs (safe, won't click products)
+          if (!clicked && popup.close_action === 'press_escape') {
+            await this.page.keyboard.press('Escape');
+            await this.page.waitForTimeout(300);
+            closed.push({ selector: 'keyboard:Escape', text: popup.button_text, success: true });
+            clicked = true;
+            console.log(`[PopupHandler] AI: Closed by Escape key`);
+          }
+
+          if (!clicked) {
+            console.log(`[PopupHandler] AI: Could not find safe button for "${popup.button_text}"`);
+          }
+
+          await this.page.waitForTimeout(500); // Wait for animation
+        } catch (error) {
+          console.log(`[PopupHandler] Failed to close popup: ${error}`);
+          closed.push({ selector: popup.button_text, text: popup.button_text, success: false });
+        }
+      }
+
+      // Check remaining popups
+      const remaining = await this.countRemainingPopups();
+
+      // If AI didn't close all, try pattern-based as backup
+      if (remaining > 0) {
+        console.log('[PopupHandler] AI left some popups, running pattern detection...');
+        const patternResult = await this.autoClosePopups();
+        return {
+          found: found + patternResult.found,
+          closed: [...closed, ...patternResult.closed],
+          remaining: patternResult.remaining,
+          source: 'ai'
+        };
+      }
+
+      return { found, closed, remaining: 0, source: 'ai' };
+    } catch (error) {
+      console.error('[PopupHandler] AI detection error:', error);
+      return this.autoClosePopups();
+    }
   }
 
   /**

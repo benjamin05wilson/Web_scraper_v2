@@ -1678,6 +1678,65 @@ export class DOMInspector {
   // =========================================================================
 
   /**
+   * Auto-detect product using AI-enhanced detection (Gemini Vision).
+   * Falls back to ML-based detection if AI is unavailable or fails.
+   * Returns element selector along with confidence score and source.
+   */
+  async autoDetectProductWithAI(): Promise<(ElementSelector & { confidence: number; fallbackRecommended: boolean; source: 'ai' | 'ml' }) | null> {
+    await this.inject();
+
+    // Check if this is a Zara page - use Zara-specific detection
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('zara.com')) {
+      const zaraResult = await this.autoDetectZaraProduct();
+      if (zaraResult) {
+        return { ...zaraResult, confidence: 0.9, fallbackRecommended: false, source: 'ml' as const };
+      }
+      return null;
+    }
+
+    console.log('[DOMInspector] Using AI-enhanced product detection');
+
+    try {
+      // Use the AI-enhanced ProductDetector
+      const result = await this.productDetector.detectProductWithAI();
+
+      if (!result.selectedElement) {
+        console.log('[DOMInspector] No product detected:', result.reason);
+        return null;
+      }
+
+      const { selectedElement, confidence, fallbackRecommended, reason, source } = result;
+
+      console.log(`[DOMInspector] ${source.toUpperCase()}-detected product: ${selectedElement.selector}`);
+      console.log(`[DOMInspector] Confidence: ${(confidence * 100).toFixed(0)}%`);
+      console.log(`[DOMInspector] Generic selector: ${selectedElement.genericSelector}`);
+
+      if (fallbackRecommended) {
+        console.log(`[DOMInspector] Low confidence - ${reason}`);
+      }
+
+      // Return in the expected ElementSelector format
+      return {
+        tagName: '',
+        css: selectedElement.genericSelector,
+        cssSpecific: selectedElement.selector,
+        boundingBox: selectedElement.boundingBox,
+        text: '',
+        attributes: {},
+        confidence,
+        fallbackRecommended,
+        source,
+      };
+
+    } catch (error) {
+      console.error('[DOMInspector] AI auto-detect error:', error);
+      // Fall back to legacy detection on error
+      return this.legacyAutoDetectProduct() as any;
+    }
+  }
+
+  /**
    * Auto-detect product using ML-based multi-factor scoring.
    * Returns element selector along with confidence score.
    */

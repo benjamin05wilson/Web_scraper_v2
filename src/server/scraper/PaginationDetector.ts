@@ -5,6 +5,7 @@
 
 import type { Page } from 'playwright';
 import type { PaginationCandidate } from '../../shared/types.js';
+import { getGeminiService } from '../ai/GeminiService.js';
 
 /**
  * Offset pattern for URL-based pagination (e.g., ?o=0 → ?o=24 → ?o=48)
@@ -1934,6 +1935,762 @@ export class PaginationDetector {
       method: 'none',
       candidates,
     };
+  }
+
+  /**
+   * Build a CSS selector from AI-provided button attributes
+   * Tries multiple strategies and validates each one
+   */
+  private async buildSelectorFromAttributes(attrs: {
+    text?: string;
+    aria_label?: string;
+    classes?: string[];
+    data_attributes?: Record<string, string>;
+    tag?: 'a' | 'button' | 'div' | 'span';
+    rel?: string;
+  }): Promise<string | null> {
+    const tag = attrs.tag || 'a, button';
+    const selectorsToTry: string[] = [];
+
+    // Strategy 1: rel="next" is very reliable
+    if (attrs.rel === 'next') {
+      selectorsToTry.push(`a[rel="next"]`);
+      selectorsToTry.push(`[rel="next"]`);
+    }
+
+    // Strategy 2: aria-label (very reliable)
+    if (attrs.aria_label) {
+      const label = attrs.aria_label.replace(/"/g, '\\"');
+      selectorsToTry.push(`${tag}[aria-label="${label}"]`);
+      selectorsToTry.push(`[aria-label="${label}"]`);
+      // Also try partial match
+      selectorsToTry.push(`${tag}[aria-label*="${label.split(' ')[0]}"]`);
+    }
+
+    // Strategy 3: data attributes (very reliable)
+    if (attrs.data_attributes) {
+      for (const [key, value] of Object.entries(attrs.data_attributes)) {
+        const safeValue = value.replace(/"/g, '\\"');
+        selectorsToTry.push(`${tag}[data-${key}="${safeValue}"]`);
+        selectorsToTry.push(`[data-${key}="${safeValue}"]`);
+      }
+    }
+
+    // Strategy 4: stable class names (filter out dynamic ones)
+    if (attrs.classes && attrs.classes.length > 0) {
+      const stableClasses = attrs.classes.filter(c =>
+        !c.match(/^(css-|sc-|[a-z]{1,3}[0-9]+|[0-9]+)/) && c.length > 2
+      );
+      if (stableClasses.length > 0) {
+        // Try with tag
+        selectorsToTry.push(`${attrs.tag || 'a'}.${stableClasses.join('.')}`);
+        selectorsToTry.push(`${attrs.tag || 'button'}.${stableClasses.join('.')}`);
+        // Try just classes
+        selectorsToTry.push(`.${stableClasses.join('.')}`);
+        // Try individual classes
+        for (const cls of stableClasses) {
+          selectorsToTry.push(`${attrs.tag || 'a'}.${cls}`);
+          selectorsToTry.push(`.${cls}`);
+        }
+      }
+    }
+
+    // Strategy 5: Text-based selectors handled separately via findButtonByText
+
+    console.log(`[PaginationDetector] Trying ${selectorsToTry.length} selectors from attributes...`);
+
+    // Test each selector
+    for (const selector of selectorsToTry) {
+      try {
+        const valid = await this.testPaginationSelector(selector);
+        if (valid) {
+          console.log(`[PaginationDetector] Found working selector: ${selector}`);
+          return selector;
+        }
+      } catch (e) {
+        // Invalid selector syntax, skip
+      }
+    }
+
+    // Strategy 6: If we have text, try to find button by text content
+    // Don't pass the AI's suggested tag - it's often wrong. Search all clickable elements.
+    if (attrs.text && attrs.text.trim()) {
+      const textSelector = await this.findButtonByText(attrs.text.trim());
+      if (textSelector) {
+        console.log(`[PaginationDetector] Found button by text: ${textSelector}`);
+        return textSelector;
+      }
+    }
+
+    // Strategy 7: Find next page links by href pattern (page=2, p=2, offset=X, etc.)
+    const hrefSelector = await this.findNextPageByHref();
+    if (hrefSelector) {
+      console.log(`[PaginationDetector] Found next page by href: ${hrefSelector}`);
+      return hrefSelector;
+    }
+
+    console.log(`[PaginationDetector] Could not build valid selector from attributes`);
+    return null;
+  }
+
+  /**
+   * Find a "next page" link by looking at href patterns
+   * Note: Uses string-based evaluate to avoid tsx __name decorator issues
+   */
+  private async findNextPageByHref(): Promise<string | null> {
+    const script = `
+      (function() {
+        var currentParams = new URLSearchParams(window.location.search);
+
+        // Get current page number from URL if present
+        var currentPage = 1;
+        var pageKeys = ['page', 'p', 'pg', 'pn'];
+        for (var i = 0; i < pageKeys.length; i++) {
+          var val = currentParams.get(pageKeys[i]);
+          if (val && !isNaN(parseInt(val))) {
+            currentPage = parseInt(val);
+            break;
+          }
+        }
+
+        // Also check for offset
+        var currentOffset = 0;
+        var offsetKeys = ['offset', 'o', 'start', 'from'];
+        for (var i = 0; i < offsetKeys.length; i++) {
+          var val = currentParams.get(offsetKeys[i]);
+          if (val && !isNaN(parseInt(val))) {
+            currentOffset = parseInt(val);
+            break;
+          }
+        }
+
+        // Find all links on the page
+        var links = document.querySelectorAll('a[href]');
+        var candidates = [];
+
+        for (var li = 0; li < links.length; li++) {
+          var link = links[li];
+          var href = link.getAttribute('href') || '';
+          if (!href || href === '#' || href.indexOf('javascript:') === 0) continue;
+
+          // Check if link is visible and reasonable size for pagination
+          var rect = link.getBoundingClientRect();
+          var style = window.getComputedStyle(link);
+          if (rect.width === 0 || rect.height === 0 || style.display === 'none' || style.visibility === 'hidden') {
+            continue;
+          }
+          // Skip huge elements (probably not pagination buttons)
+          if (rect.width > 300 || rect.height > 150) continue;
+
+          var score = 0;
+          var isNextPage = false;
+
+          try {
+            var linkUrl = new URL(href, window.location.origin);
+            var linkParams = new URLSearchParams(linkUrl.search);
+
+            // Check for page parameter pointing to next page
+            for (var pi = 0; pi < pageKeys.length; pi++) {
+              var val = linkParams.get(pageKeys[pi]);
+              if (val && !isNaN(parseInt(val))) {
+                var pageNum = parseInt(val);
+                if (pageNum === currentPage + 1) {
+                  isNextPage = true;
+                  score += 10;
+                } else if (pageNum === 2 && currentPage === 1) {
+                  isNextPage = true;
+                  score += 10;
+                }
+              }
+            }
+
+            // Check for offset parameter
+            for (var oi = 0; oi < offsetKeys.length; oi++) {
+              var val = linkParams.get(offsetKeys[oi]);
+              if (val && !isNaN(parseInt(val))) {
+                var offset = parseInt(val);
+                if (offset > currentOffset) {
+                  isNextPage = true;
+                  score += 8;
+                }
+              }
+            }
+
+            // Check path patterns like /page/2
+            var pathMatch = linkUrl.pathname.match(/\\/page\\/(\\d+)/i);
+            if (pathMatch) {
+              var pageNum = parseInt(pathMatch[1]);
+              if (pageNum === currentPage + 1 || (pageNum === 2 && currentPage === 1)) {
+                isNextPage = true;
+                score += 10;
+              }
+            }
+          } catch (e) {
+            // Invalid URL, skip
+            continue;
+          }
+
+          if (!isNextPage) continue;
+
+          // Bonus for pagination context - check element and parents
+          var checkEl = link;
+          for (var ci = 0; ci < 3 && checkEl; ci++) {
+            var classStr = typeof checkEl.className === 'string' ? checkEl.className : (checkEl.className && checkEl.className.baseVal) || '';
+            var classes = classStr.toLowerCase();
+            var id = checkEl.id ? checkEl.id.toLowerCase() : '';
+            if (classes.indexOf('paginat') >= 0 || classes.indexOf('page') >= 0 || classes.indexOf('next') >= 0 ||
+                id.indexOf('paginat') >= 0 || id.indexOf('page') >= 0) {
+              score += 5;
+              break;
+            }
+            checkEl = checkEl.parentElement;
+          }
+
+          // Bonus for aria-label or title containing "next"
+          var ariaLabel = link.getAttribute('aria-label');
+          ariaLabel = ariaLabel ? ariaLabel.toLowerCase() : '';
+          var title = link.getAttribute('title');
+          title = title ? title.toLowerCase() : '';
+          if (ariaLabel.indexOf('next') >= 0 || title.indexOf('next') >= 0) {
+            score += 3;
+          }
+
+          // Build selector for this element
+          var selector = '';
+          if (link.id) {
+            selector = '#' + link.id;
+          } else {
+            var aria = link.getAttribute('aria-label');
+            if (aria) {
+              selector = 'a[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
+            } else {
+              // Try data attributes
+              var attrs = link.attributes;
+              for (var ai = 0; ai < attrs.length; ai++) {
+                var attr = attrs[ai];
+                if (attr.name.indexOf('data-') === 0 && attr.value) {
+                  selector = 'a[' + attr.name + '="' + attr.value.replace(/"/g, '\\\\"') + '"]';
+                  break;
+                }
+              }
+              // Try classes
+              if (!selector) {
+                var linkClassStr = typeof link.className === 'string' ? link.className : (link.className && link.className.baseVal) || '';
+                var linkClasses = [];
+                var classParts = linkClassStr.split(' ');
+                for (var cpi = 0; cpi < classParts.length; cpi++) {
+                  var c = classParts[cpi];
+                  if (c && c.length > 2 && !c.match(/^(css-|sc-|[a-z]{1,3}[0-9]+|[0-9]+)/)) {
+                    linkClasses.push(c);
+                  }
+                }
+                if (linkClasses.length > 0) {
+                  selector = 'a.' + linkClasses.slice(0, 2).join('.');
+                }
+              }
+              // Use href pattern as last resort
+              if (!selector) {
+                var hrefMatch = href.match(/[?&](page|p|offset|o)=(\\d+)/);
+                if (hrefMatch) {
+                  selector = 'a[href*="' + hrefMatch[1] + '=' + hrefMatch[2] + '"]';
+                }
+              }
+            }
+          }
+
+          if (selector && score > 0) {
+            candidates.push({ score: score, selector: selector });
+          }
+        }
+
+        // Sort by score descending
+        candidates.sort(function(a, b) { return b.score - a.score; });
+
+        // Return best candidate's selector
+        if (candidates.length > 0) {
+          return candidates[0].selector;
+        }
+
+        return null;
+      })()
+    `;
+
+    return await this.page.evaluate(script) as string | null;
+  }
+
+  /**
+   * Find a pagination button by its text content and return a working selector
+   * Note: Uses evaluateHandle to pass a string function to avoid tsx __name decorator issues
+   */
+  private async findButtonByText(text: string, preferredTag?: string): Promise<string | null> {
+    // Use string-based evaluate to avoid tsx transpiler adding __name decorators
+    const searchText = text.toLowerCase().trim();
+    const isShortText = searchText.length <= 3;
+    // Search all common clickable elements - AI often misidentifies the tag type
+    const tagsJson = JSON.stringify(preferredTag ? [preferredTag] : ['a', 'button', 'span', 'div', '[role="button"]']);
+
+    const script = `
+      (function() {
+        var searchText = ${JSON.stringify(searchText)};
+        var isShortText = ${isShortText};
+        var tags = ${tagsJson};
+
+        for (var ti = 0; ti < tags.length; ti++) {
+          var tagSelector = tags[ti];
+          var elements = document.querySelectorAll(tagSelector);
+          for (var ei = 0; ei < elements.length; ei++) {
+            var el = elements[ei];
+
+            // Get direct text content
+            var directText = '';
+            var childNodes = el.childNodes;
+            for (var ni = 0; ni < childNodes.length; ni++) {
+              var n = childNodes[ni];
+              if (n.nodeType === Node.TEXT_NODE) {
+                directText += (n.textContent ? n.textContent.trim() : '') + ' ';
+              }
+            }
+            directText = directText.trim().toLowerCase();
+            var fullText = el.textContent ? el.textContent.toLowerCase().trim() : '';
+            var ariaLabel = el.getAttribute('aria-label');
+            ariaLabel = ariaLabel ? ariaLabel.toLowerCase() : '';
+
+            // Check text match
+            var textMatches = false;
+            if (isShortText) {
+              textMatches = directText === searchText ||
+                           fullText === searchText ||
+                           (fullText.length <= 5 && fullText.indexOf(searchText) >= 0) ||
+                           ariaLabel.indexOf('next') >= 0 || ariaLabel.indexOf('forward') >= 0 ||
+                           ariaLabel.indexOf('page') >= 0;
+            } else {
+              textMatches = fullText === searchText ||
+                           fullText.indexOf(searchText) >= 0 ||
+                           ariaLabel.indexOf(searchText) >= 0;
+            }
+
+            if (!textMatches) continue;
+
+            // Verify visible and reasonable size
+            var rect = el.getBoundingClientRect();
+            var style = window.getComputedStyle(el);
+            if (rect.width === 0 || rect.height === 0 || style.display === 'none' || style.visibility === 'hidden') {
+              continue;
+            }
+
+            // For short text, must look like pagination button
+            if (isShortText) {
+              // Size check
+              if (!(rect.width > 15 && rect.width < 300 && rect.height > 15 && rect.height < 150)) continue;
+
+              // Context check - look for pagination-related class/id on element or parents
+              var hasContext = false;
+              var checkEl = el;
+              for (var pi = 0; pi < 3 && checkEl; pi++) {
+                var classStr = typeof checkEl.className === 'string' ? checkEl.className : (checkEl.className && checkEl.className.baseVal) || '';
+                var classes = classStr.toLowerCase();
+                var id = checkEl.id ? checkEl.id.toLowerCase() : '';
+                if (classes.indexOf('paginat') >= 0 || classes.indexOf('page') >= 0 || classes.indexOf('next') >= 0 ||
+                    classes.indexOf('prev') >= 0 || classes.indexOf('nav') >= 0 || classes.indexOf('arrow') >= 0 ||
+                    id.indexOf('paginat') >= 0 || id.indexOf('page') >= 0 || id.indexOf('next') >= 0) {
+                  hasContext = true;
+                  break;
+                }
+                checkEl = checkEl.parentElement;
+              }
+              if (!hasContext) continue;
+            }
+
+            // Find clickable element if needed
+            var targetEl = el;
+            if (el.tagName !== 'A' && el.tagName !== 'BUTTON') {
+              var clickableChild = el.querySelector('a[href], button, [role="button"]');
+              if (clickableChild) {
+                targetEl = clickableChild;
+              } else {
+                var clickableParent = el.closest('a, button, [role="button"]');
+                if (clickableParent) {
+                  targetEl = clickableParent;
+                }
+              }
+            }
+
+            // Build selector
+            var tag = targetEl.tagName.toLowerCase();
+
+            if (targetEl.id) {
+              return '#' + targetEl.id;
+            }
+
+            // Check if a parent has an ID - more specific selector
+            var parentWithId = null;
+            var parentCheck = targetEl.parentElement;
+            for (var depth = 0; depth < 4 && parentCheck; depth++) {
+              if (parentCheck.id) {
+                parentWithId = parentCheck;
+                break;
+              }
+              parentCheck = parentCheck.parentElement;
+            }
+
+            var aria = targetEl.getAttribute('aria-label');
+            if (aria) {
+              var ariaSelector = tag + '[aria-label="' + aria.replace(/"/g, '\\\\"') + '"]';
+              return parentWithId ? '#' + parentWithId.id + ' ' + ariaSelector : ariaSelector;
+            }
+
+            // Check href pattern for links
+            if (tag === 'a') {
+              var href = targetEl.getAttribute('href') || '';
+              var hrefMatch = href.match(/[?&](page|p|offset)=(\\d+)/);
+              if (hrefMatch) {
+                var hrefSelector = 'a[href*="' + hrefMatch[1] + '=' + hrefMatch[2] + '"]';
+                return parentWithId ? '#' + parentWithId.id + ' ' + hrefSelector : hrefSelector;
+              }
+            }
+
+            // PREFER classes before data attributes (classes are more stable)
+            var elClassStr = typeof targetEl.className === 'string' ? targetEl.className : (targetEl.className && targetEl.className.baseVal) || '';
+            var elClasses = [];
+            var classParts = elClassStr.split(' ');
+            for (var ci = 0; ci < classParts.length; ci++) {
+              var c = classParts[ci];
+              if (c && c.length > 2 && !c.match(/^(css-|sc-|[a-z]{1,3}[0-9]+|[0-9]+)/)) {
+                elClasses.push(c);
+              }
+            }
+            if (elClasses.length > 0) {
+              var classSelector = tag + '.' + elClasses.slice(0, 3).join('.');
+              return parentWithId ? '#' + parentWithId.id + ' ' + classSelector : classSelector;
+            }
+
+            // Check data attributes - but avoid JSON content (matches multiple elements)
+            var attrs = targetEl.attributes;
+            for (var ai = 0; ai < attrs.length; ai++) {
+              var attr = attrs[ai];
+              if (attr.name.indexOf('data-') === 0 && attr.value) {
+                // Skip attributes with JSON content - they often match multiple elements
+                if (attr.value.indexOf('{') >= 0 || attr.value.indexOf('[') >= 0) continue;
+                // Skip very long values
+                if (attr.value.length > 50) continue;
+                return tag + '[' + attr.name + '="' + attr.value.replace(/"/g, '\\\\"') + '"]';
+              }
+            }
+
+            // Last resort: nth-child
+            var parent = targetEl.parentElement;
+            if (parent) {
+              var siblings = parent.children;
+              var idx = 0;
+              for (var si = 0; si < siblings.length; si++) {
+                if (siblings[si] === targetEl) {
+                  idx = si + 1;
+                  break;
+                }
+              }
+              var parentClassStr = typeof parent.className === 'string' ? parent.className : (parent.className && parent.className.baseVal) || '';
+              var parentClassParts = parentClassStr.split(' ');
+              var parentClass = '';
+              for (var pci = 0; pci < parentClassParts.length; pci++) {
+                var pc = parentClassParts[pci];
+                if (pc && pc.length > 2 && !pc.match(/^(css-|sc-)/)) {
+                  parentClass = pc;
+                  break;
+                }
+              }
+              if (parentClass) {
+                return '.' + parentClass + ' > ' + tag + ':nth-child(' + idx + ')';
+              }
+            }
+          }
+        }
+        return null;
+      })()
+    `;
+
+    return await this.page.evaluate(script) as string | null;
+  }
+
+  /**
+   * AI-enhanced pagination detection using Gemini Vision
+   * Falls back to regular detection if AI fails
+   */
+  async detectBestMethodWithAI(itemSelector?: string): Promise<{
+    method: 'pagination' | 'infinite_scroll' | 'hybrid' | 'none';
+    pagination?: {
+      selector: string;
+      type: 'next_page' | 'url_pattern';
+      productsLoaded: number;
+      offset?: OffsetPattern;
+    };
+    scroll?: {
+      productsLoaded: number;
+      scrollPositions: number[];
+    };
+    candidates: PaginationCandidate[];
+    source: 'ai' | 'ml';
+  }> {
+    const gemini = getGeminiService();
+
+    if (!gemini.isEnabled) {
+      console.log('[PaginationDetector] Gemini not enabled, using ML detection');
+      const result = await this.detectBestMethod(itemSelector);
+      return { ...result, source: 'ml' };
+    }
+
+    console.log('[PaginationDetector] Starting AI-enhanced pagination detection...');
+
+    try {
+      // Take screenshot
+      const screenshotBuffer = await this.page.screenshot({ type: 'png' });
+      const screenshotBase64 = screenshotBuffer.toString('base64');
+      const currentUrl = this.page.url();
+
+      // Get HTML from bottom 30% of page (where pagination usually is)
+      const paginationHtml = await this.page.evaluate(() => {
+        const viewportHeight = window.innerHeight;
+        const scrollHeight = document.documentElement.scrollHeight;
+        const bottomAreaStart = scrollHeight - viewportHeight * 0.3;
+
+        // Find elements in bottom area
+        const elements = document.querySelectorAll('*');
+        let html = '';
+        for (const el of elements) {
+          const rect = el.getBoundingClientRect();
+          const absTop = rect.top + window.scrollY;
+          if (absTop >= bottomAreaStart && el.children.length === 0) {
+            // Leaf elements in bottom area
+            const tag = el.tagName.toLowerCase();
+            // Handle both regular className (string) and SVGAnimatedString
+            const classNameStr = typeof el.className === 'string' ? el.className : ((el.className as any)?.baseVal || '');
+            const classes = classNameStr ? `.${classNameStr.split(' ').slice(0, 2).join('.')}` : '';
+            const text = el.textContent?.trim().substring(0, 20) || '';
+            html += `<${tag}${classes}>${text}</${tag}>\n`;
+          }
+        }
+        return html.substring(0, 2000);
+      });
+
+      // Call Gemini
+      const result = await gemini.detectPagination(screenshotBase64, currentUrl, paginationHtml);
+
+      if (!result.success || !result.data) {
+        console.log(`[PaginationDetector] AI detection failed: ${result.error}, falling back to ML`);
+        const mlResult = await this.detectBestMethod(itemSelector);
+        return { ...mlResult, source: 'ml' };
+      }
+
+      const aiResult = result.data;
+      console.log(`[PaginationDetector] AI detected: method=${aiResult.method}, confidence=${aiResult.confidence} (latency: ${result.latencyMs}ms)`);
+      if (aiResult.button_attributes) {
+        console.log(`[PaginationDetector] AI button attributes:`, JSON.stringify(aiResult.button_attributes));
+      }
+
+      // Handle AI detection results
+      if (aiResult.method === 'none' || aiResult.confidence < 0.5) {
+        console.log('[PaginationDetector] AI found no pagination or low confidence, running ML detection');
+        const mlResult = await this.detectBestMethod(itemSelector);
+        return { ...mlResult, source: 'ml' };
+      }
+
+      // If AI detected infinite scroll, skip button validation and go to scroll testing
+      if (aiResult.method === 'infinite_scroll') {
+        console.log('[PaginationDetector] AI detected infinite scroll, testing scroll behavior...');
+        const mlResult = await this.detectBestMethod(itemSelector);
+        // Return AI source since AI correctly identified it, but use ML's scroll data
+        return { ...mlResult, source: 'ai' };
+      }
+
+      // Build selector from button_attributes (new approach) or use legacy selector
+      let workingSelector: string | null = null;
+
+      if (aiResult.button_attributes) {
+        workingSelector = await this.buildSelectorFromAttributes(aiResult.button_attributes);
+        if (workingSelector) {
+          console.log(`[PaginationDetector] Built selector from attributes: ${workingSelector}`);
+        }
+      }
+
+      // Fall back to legacy selector if attributes didn't work
+      if (!workingSelector && aiResult.selector) {
+        let legacySelector = aiResult.selector.trim();
+        console.log(`[PaginationDetector] Using legacy selector: ${legacySelector}`);
+
+        // Reject obviously invalid selectors before even trying querySelector
+        const invalidPatterns = [
+          /^[<>→←»«]$/, // Just arrow characters
+          /^\.{0,1}$/, // Empty or just a dot
+          /^#$/, // Just a hash
+          /^\s*$/, // Whitespace only
+          /^[0-9]+$/, // Just numbers
+        ];
+        const isInvalidSelector = legacySelector.length < 2 || invalidPatterns.some(p => p.test(legacySelector));
+
+        if (isInvalidSelector) {
+          console.log(`[PaginationDetector] AI selector is invalid: "${legacySelector}", running ML detection`);
+          const mlResult = await this.detectBestMethod(itemSelector);
+          return { ...mlResult, source: 'ml' };
+        }
+
+        // If selector is too long, try to simplify by extracting final element
+        const descendantCount = (legacySelector.match(/\s*>\s*/g) || []).length;
+        if (descendantCount > 3) {
+          console.log(`[PaginationDetector] AI selector too long (${descendantCount} descendants), simplifying...`);
+
+          // Extract the last part of the selector (the actual clickable element)
+          const parts = legacySelector.split(/\s*>\s*/);
+          const lastPart = parts[parts.length - 1].trim();
+
+          // If the last part has useful identifiers (class, id, attribute), use it
+          if (lastPart && (lastPart.includes('.') || lastPart.includes('[') || lastPart.includes('#'))) {
+            console.log(`[PaginationDetector] Simplified to: ${lastPart}`);
+            legacySelector = lastPart;
+          } else if (lastPart) {
+            // Try combining the last two parts for more specificity
+            const secondLast = parts.length > 1 ? parts[parts.length - 2].trim() : '';
+            if (secondLast && (secondLast.includes('.') || secondLast.includes('[') || secondLast.includes('#'))) {
+              const combined = `${secondLast} > ${lastPart}`;
+              console.log(`[PaginationDetector] Simplified to: ${combined}`);
+              legacySelector = combined;
+            } else {
+              // Last resort: just use the tag with any available identifiers
+              console.log(`[PaginationDetector] Using last part: ${lastPart}`);
+              legacySelector = lastPart;
+            }
+          }
+        }
+
+        // Check if selector ends with a non-clickable element (svg, span, img, path, etc.)
+        // These selectors target children of clickable elements and need to be fixed
+        const nonClickableEndings = /\s*>\s*(svg|span|img|path|i|icon|div)(\s*$|\[)/i;
+        const endsWithNonClickable = nonClickableEndings.test(legacySelector);
+
+        // Check if selector targets a non-clickable child element
+        // If so, try to find the parent clickable element BEFORE testing
+        let needsParentFix = endsWithNonClickable;
+        if (!needsParentFix) {
+          const selectorValid = await this.testPaginationSelector(legacySelector);
+          needsParentFix = !selectorValid;
+        }
+
+        if (needsParentFix) {
+          // Try to find parent clickable element
+          const parentSelector = await this.page.evaluate((selector) => {
+            try {
+              const el = document.querySelector(selector);
+              if (!el) return null;
+
+              // If this is a non-clickable element, find parent a or button
+              const clickableTags = ['A', 'BUTTON'];
+              if (!clickableTags.includes(el.tagName)) {
+                const parent = el.closest('a, button, [role="button"]');
+                if (parent) {
+                  // Build a simple selector for the parent
+                  if (parent.id) return `#${parent.id}`;
+                  const classes = Array.from(parent.classList)
+                    .filter(c => !c.match(/^(css-|sc-|[0-9])/))
+                    .slice(0, 2);
+                  if (classes.length > 0) {
+                    return `${parent.tagName.toLowerCase()}.${classes.join('.')}`;
+                  }
+                  // Try aria-label
+                  const ariaLabel = parent.getAttribute('aria-label');
+                  if (ariaLabel) {
+                    return `${parent.tagName.toLowerCase()}[aria-label="${ariaLabel}"]`;
+                  }
+                }
+              }
+              return null;
+            } catch {
+              return null;
+            }
+          }, legacySelector);
+
+          if (parentSelector) {
+            console.log(`[PaginationDetector] AI selector targeted child, using parent: ${parentSelector}`);
+            legacySelector = parentSelector;
+          }
+        }
+
+        // Re-validate with potentially updated selector
+        const finalValid = await this.testPaginationSelector(legacySelector);
+        if (finalValid) {
+          workingSelector = legacySelector;
+        } else {
+          console.log(`[PaginationDetector] AI legacy selector not valid: ${legacySelector}`);
+        }
+      }
+
+      // If we have a working selector (from attributes or legacy), test pagination click
+      if (workingSelector) {
+        // Update aiResult.selector to use working selector
+        aiResult.selector = workingSelector;
+
+        // Test the pagination click
+        const clickResult = await this.testPaginationClick(workingSelector, itemSelector);
+
+        if (clickResult.success) {
+          console.log(`[PaginationDetector] AI pagination validated: ${clickResult.newProductsFound} new products`);
+
+          // Build offset pattern if provided by AI or detected from URL
+          let offset: OffsetPattern | undefined;
+          if (aiResult.offset_config) {
+            offset = {
+              key: aiResult.offset_config.key,
+              start: aiResult.offset_config.start,
+              increment: aiResult.offset_config.increment,
+              type: aiResult.offset_config.increment === 1 ? 'page' : 'offset'
+            };
+          } else if (clickResult.offsetPattern) {
+            offset = clickResult.offsetPattern;
+          }
+
+          // Also test scroll for hybrid detection
+          const scrollResult = await this.testInfiniteScroll(itemSelector);
+          const scrollWorks = scrollResult.finalCount > scrollResult.initialCount;
+
+          if (scrollWorks) {
+            return {
+              method: 'hybrid',
+              pagination: {
+                selector: workingSelector,
+                type: aiResult.method === 'numbered_pages' || aiResult.url_pattern ? 'url_pattern' : 'next_page',
+                productsLoaded: clickResult.newProductsFound,
+                offset,
+              },
+              scroll: {
+                productsLoaded: scrollResult.finalCount - scrollResult.initialCount,
+                scrollPositions: scrollResult.scrollPositions,
+              },
+              candidates: [],
+              source: 'ai',
+            };
+          }
+
+          return {
+            method: 'pagination',
+            pagination: {
+              selector: workingSelector,
+              type: aiResult.method === 'numbered_pages' || aiResult.url_pattern ? 'url_pattern' : 'next_page',
+              productsLoaded: clickResult.newProductsFound,
+              offset,
+            },
+            candidates: [],
+            source: 'ai',
+          };
+        }
+      }
+
+      // AI didn't work out, fall back to ML
+      console.log('[PaginationDetector] AI suggestion could not be validated, using ML detection');
+      const mlResult = await this.detectBestMethod(itemSelector);
+      return { ...mlResult, source: 'ml' };
+
+    } catch (error) {
+      console.error('[PaginationDetector] AI detection error:', error);
+      const mlResult = await this.detectBestMethod(itemSelector);
+      return { ...mlResult, source: 'ml' };
+    }
   }
 
   /**

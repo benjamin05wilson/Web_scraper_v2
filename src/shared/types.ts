@@ -57,7 +57,9 @@ export type WSMessageType =
   | 'network:productCaptured'
   | 'network:patternDetected'
   | 'network:getProducts'
-  | 'network:products';
+  | 'network:products'
+  | 'fields:autoLabel'
+  | 'fields:labeled';
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;

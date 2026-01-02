@@ -139,7 +139,7 @@ export function BuilderPage() {
   const [pendingSave, setPendingSave] = useState<{ filename: string } | null>(null);
 
   // Network capture state (for virtual scroll / XHR-based sites)
-  const [networkExtractionConfig, setNetworkExtractionConfig] = useState<NetworkExtractionConfig | null>(null);
+  const [networkExtractionConfig] = useState<NetworkExtractionConfig | null>(null);
 
   const addLog = useCallback((message: string, type: LogEntry['type'] = 'info') => {
     setLogEntries((prev) => [...prev, createLogEntry(message, type)]);

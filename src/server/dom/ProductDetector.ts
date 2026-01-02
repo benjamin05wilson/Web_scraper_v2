@@ -7,6 +7,7 @@ import { ElementScorer } from '../ml/ElementScorer.js';
 import { StructuralAnalyzer } from '../ml/StructuralAnalyzer.js';
 import { ContentClassifier } from '../ml/ContentClassifier.js';
 import { LazyLoadHandler } from '../ml/LazyLoadHandler.js';
+import { getGeminiService } from '../ai/GeminiService.js';
 import type {
   DetectionResult,
   DetectorConfig,
@@ -1366,5 +1367,169 @@ export class ProductDetector {
     `;
 
     await this.page.evaluate(script);
+  }
+
+  /**
+   * AI-enhanced product detection using Gemini Vision
+   * Falls back to ML detection if AI fails
+   */
+  async detectProductWithAI(): Promise<DetectionResult & { source: 'ai' | 'ml' }> {
+    const gemini = getGeminiService();
+
+    if (!gemini.isEnabled) {
+      console.log('[ProductDetector] Gemini not enabled, using ML detection');
+      const result = await this.detectProduct();
+      return { ...result, source: 'ml' };
+    }
+
+    console.log('[ProductDetector] Starting AI-enhanced product detection...');
+
+    try {
+      // Take screenshot
+      const screenshotBuffer = await this.page.screenshot({ type: 'png' });
+      const screenshotBase64 = screenshotBuffer.toString('base64');
+
+      // Get simplified DOM structure for context
+      const domStructure = await this.page.evaluate(() => {
+        const elements: string[] = [];
+        const seen = new Set<Element>();
+
+        // Find elements that might be product containers
+        const selectors = [
+          '[class*="product"]',
+          '[class*="item"]',
+          '[class*="card"]',
+          '[class*="tile"]',
+          '[class*="grid"]',
+          '[class*="list"]',
+          'article',
+          'section'
+        ];
+
+        for (const sel of selectors) {
+          try {
+            const found = document.querySelectorAll(sel);
+            for (const el of found) {
+              if (seen.has(el)) continue;
+              seen.add(el);
+
+              const rect = el.getBoundingClientRect();
+              if (rect.width < 50 || rect.height < 50) continue;
+
+              const tag = el.tagName.toLowerCase();
+              const classes = el.className ? `.${el.className.split(' ').slice(0, 3).join('.')}` : '';
+              const childCount = el.children.length;
+              const hasImg = el.querySelector('img') ? '[has-img]' : '';
+              const hasPrice = el.textContent?.match(/[$€£¥]\d+|\d+\.\d{2}/) ? '[has-price]' : '';
+
+              elements.push(`<${tag}${classes}${hasImg}${hasPrice}>(${childCount} children)`);
+
+              if (elements.length >= 50) break;
+            }
+          } catch (e) {
+            // Invalid selector
+          }
+          if (elements.length >= 50) break;
+        }
+
+        return elements.join('\n');
+      });
+
+      // Call Gemini
+      const result = await gemini.detectProducts(screenshotBase64, domStructure);
+
+      if (!result.success || !result.data) {
+        console.log(`[ProductDetector] AI detection failed: ${result.error}, falling back to ML`);
+        const mlResult = await this.detectProduct();
+        return { ...mlResult, source: 'ml' };
+      }
+
+      const aiResult = result.data;
+      console.log(`[ProductDetector] AI detected: found=${aiResult.products_found}, selector=${aiResult.item_selector}, count=${aiResult.item_count}, confidence=${aiResult.confidence} (latency: ${result.latencyMs}ms)`);
+
+      if (!aiResult.products_found || !aiResult.item_selector || aiResult.confidence < 0.5) {
+        console.log('[ProductDetector] AI found no products or low confidence, falling back to ML');
+        const mlResult = await this.detectProduct();
+        return { ...mlResult, source: 'ml' };
+      }
+
+      // Sanitize AI-suggested selector - remove invalid pseudo-selectors the AI might add
+      let sanitizedSelector = aiResult.item_selector
+        .replace(/\[has-img\]/gi, '')
+        .replace(/\[has-price\]/gi, '')
+        .replace(/\[has-link\]/gi, '')
+        .replace(/\[has-text\]/gi, '')
+        .replace(/\[contains-.*?\]/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      // If sanitization removed everything meaningful, fall back
+      if (!sanitizedSelector || sanitizedSelector.length < 2) {
+        console.log('[ProductDetector] AI selector invalid after sanitization, falling back to ML');
+        const mlResult = await this.detectProduct();
+        return { ...mlResult, source: 'ml' };
+      }
+
+      console.log(`[ProductDetector] Sanitized selector: ${sanitizedSelector}`);
+
+      // Validate AI-suggested selector
+      const selectorCheck = await this.page.evaluate((selector) => {
+        try {
+          const elements = document.querySelectorAll(selector);
+          if (elements.length === 0) return { valid: false, count: 0, reason: 'No elements found' };
+          if (elements.length < 3) return { valid: false, count: elements.length, reason: 'Too few elements' };
+          if (elements.length > 200) return { valid: false, count: elements.length, reason: 'Too many elements' };
+
+          // Check if elements have images and reasonable size
+          let validCount = 0;
+          for (const el of elements) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width >= 50 && rect.height >= 50 && el.querySelector('img')) {
+              validCount++;
+            }
+          }
+
+          if (validCount < 3) return { valid: false, count: validCount, reason: 'Not enough valid product elements' };
+
+          return { valid: true, count: elements.length, validCount };
+        } catch (e) {
+          return { valid: false, count: 0, reason: 'Invalid selector syntax' };
+        }
+      }, sanitizedSelector);
+
+      if (!selectorCheck.valid) {
+        console.log(`[ProductDetector] AI selector validation failed: ${selectorCheck.reason}, trying ML detection`);
+        const mlResult = await this.detectProduct();
+        return { ...mlResult, source: 'ml' };
+      }
+
+      console.log(`[ProductDetector] AI selector validated: ${selectorCheck.count} elements found`);
+
+      // Get bounding box of first element
+      const boundingBox = await this.getBoundingBox(sanitizedSelector);
+
+      // Generate a generic selector (the sanitized AI selector should already be generic)
+      const genericSelector = sanitizedSelector;
+
+      return {
+        selectedElement: {
+          selector: `${sanitizedSelector}:first-of-type`,
+          genericSelector,
+          boundingBox,
+        },
+        confidence: aiResult.confidence,
+        fallbackRecommended: aiResult.confidence < 0.7,
+        reason: aiResult.confidence < 0.7
+          ? `AI detection (${(aiResult.confidence * 100).toFixed(0)}% confidence) - manual verification recommended`
+          : undefined,
+        allCandidates: [],
+        source: 'ai',
+      };
+
+    } catch (error) {
+      console.error('[ProductDetector] AI detection error:', error);
+      const mlResult = await this.detectProduct();
+      return { ...mlResult, source: 'ml' };
+    }
   }
 }
