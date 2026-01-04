@@ -5,7 +5,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { ElementSelector, PaginationCandidate, WSMessageType } from '../../shared/types';
 
-// Workflow states
+// Workflow states - PRODUCTS FIRST, then PAGINATION
 export type AutomatedBuilderState =
   | 'IDLE'
   | 'LAUNCHING_BROWSER'
@@ -15,15 +15,15 @@ export type AutomatedBuilderState =
   | 'PRODUCT_CONFIRMATION'
   | 'MANUAL_PRODUCT_SELECT'
   | 'LABELING'
-  | 'PAGINATION_DETECTING'  // New state: actively detecting pagination
-  | 'PAGINATION_CONFIRMATION'
-  | 'PAGINATION_MANUAL'
+  | 'PAGINATION_DEMO'         // User demonstrating pagination (scroll or click)
+  | 'PAGINATION_DEMO_SUCCESS' // Demo succeeded, show result for confirmation
+  | 'PAGINATION_MANUAL'       // Manual fallback
   | 'FINAL_CONFIG'
   | 'SAVING'
   | 'COMPLETE';
 
 // Overlay types
-export type OverlayType = 'popup' | 'product' | 'pagination' | 'pagination_detecting' | null;
+export type OverlayType = 'popup' | 'product' | 'pagination_demo' | 'pagination_demo_success' | null;
 
 // Dismiss action for popup recording
 export interface DismissAction {
@@ -56,6 +56,28 @@ export interface PaginationPattern {
   productsPerPage?: number;
 }
 
+// User-demonstrated pagination result
+export interface DemoPaginationResult {
+  method: 'scroll' | 'click';
+  scrollDistance?: number;
+  clickSelector?: string;
+  clickCoordinates?: { x: number; y: number };
+  beforeProductCount: number;
+  afterProductCount: number;
+  productDelta: number;
+  verified: boolean;
+}
+
+// Demo progress state
+export interface DemoProgressState {
+  productCount: number;
+  productDelta: number;
+  accumulatedScroll: number;
+  lastClickedSelector?: string;
+  wrongNavWarning: boolean;
+  shouldAutoComplete: boolean;
+}
+
 interface UseAutomatedBuilderFlowOptions {
   sessionId: string | null;
   sessionStatus: 'disconnected' | 'connecting' | 'ready' | 'streaming' | 'scraping';
@@ -84,13 +106,17 @@ export interface UseAutomatedBuilderFlowReturn {
   paginationCandidates: PaginationCandidate[];
   isPaginationDetecting: boolean;
 
+  // Pagination demo data
+  demoProgress: DemoProgressState;
+  demoResult: DemoPaginationResult | null;
+
   // State transitions
   transition: (event: BuilderEvent) => void;
 
   // Overlay handlers
   handlePopupConfirm: (allClosed: boolean) => void;
   handleProductConfirm: (correct: boolean) => void;
-  handlePaginationConfirm: (correct: boolean) => void;
+  handleDemoConfirm: (confirmed: boolean) => void;
 
   // Action handlers
   startBrowser: () => void;
@@ -98,7 +124,9 @@ export interface UseAutomatedBuilderFlowReturn {
   finishDismissRecording: () => void;
   selectPaginationCandidate: (candidate: PaginationCandidate) => void;
   setPaginationManual: (pattern: PaginationPattern) => void;
-  proceedToFinalConfig: (itemSelector?: string) => void;
+  proceedToPaginationDemo: (itemSelector: string) => void;
+  retryDemo: () => void;
+  skipPagination: () => void;
   startSaving: () => void;
   completeSave: () => void;
   reset: () => void;
@@ -120,43 +148,48 @@ type BuilderEvent =
   | 'PRODUCT_NO'
   | 'MANUAL_SELECTED'
   | 'LABELS_APPLIED'
-  | 'PAGINATION_DETECTED'
-  | 'PAGINATION_YES'
-  | 'PAGINATION_NO'
-  | 'PAGINATION_CONFIGURED'
+  | 'DEMO_STARTED'           // Demo mode activated
+  | 'DEMO_SUCCESS'           // Demo completed with product increase
+  | 'DEMO_FAILED'            // Demo completed but no product increase
+  | 'DEMO_CONFIRMED'         // User confirmed demo result
+  | 'DEMO_RETRY'             // User wants to retry demo
+  | 'PAGINATION_CONFIGURED'  // Manual pagination configured
+  | 'PAGINATION_SKIPPED'     // User skipped pagination
   | 'SAVE_CLICKED'
   | 'SAVE_SUCCESS'
   | 'RESET';
 
+// New flow: Products FIRST, then Pagination Demo
 const STEP_TITLES: Record<AutomatedBuilderState, string> = {
   IDLE: 'Enter URL',
   LAUNCHING_BROWSER: 'Opening Browser',
   POPUP_DETECTION: 'Checking Popups',
   POPUP_RECORDING: 'Recording Popup Dismissals',
-  PAGINATION_DETECTING: 'Detecting Pagination',
-  PAGINATION_CONFIRMATION: 'Confirm Pagination',
-  PAGINATION_MANUAL: 'Configure Pagination',
   AUTO_DETECTING_PRODUCT: 'Detecting Product Card',
   PRODUCT_CONFIRMATION: 'Confirm Product Card',
   MANUAL_PRODUCT_SELECT: 'Select Product Card',
   LABELING: 'Label Product Data',
+  PAGINATION_DEMO: 'Demonstrate Pagination',
+  PAGINATION_DEMO_SUCCESS: 'Confirm Pagination Method',
+  PAGINATION_MANUAL: 'Configure Pagination',
   FINAL_CONFIG: 'Final Configuration',
   SAVING: 'Saving Config',
   COMPLETE: 'Complete',
 };
 
+// Step order: Popups -> Products -> Labeling -> Pagination Demo -> Config
 const STEP_NUMBERS: Record<AutomatedBuilderState, number> = {
   IDLE: 1,
   LAUNCHING_BROWSER: 1,
   POPUP_DETECTION: 2,
   POPUP_RECORDING: 2,
-  PAGINATION_DETECTING: 3,
-  PAGINATION_CONFIRMATION: 3,
-  PAGINATION_MANUAL: 3,
-  AUTO_DETECTING_PRODUCT: 4,
-  PRODUCT_CONFIRMATION: 4,
-  MANUAL_PRODUCT_SELECT: 4,
-  LABELING: 5,
+  AUTO_DETECTING_PRODUCT: 3,
+  PRODUCT_CONFIRMATION: 3,
+  MANUAL_PRODUCT_SELECT: 3,
+  LABELING: 4,
+  PAGINATION_DEMO: 5,
+  PAGINATION_DEMO_SUCCESS: 5,
+  PAGINATION_MANUAL: 5,
   FINAL_CONFIG: 6,
   SAVING: 6,
   COMPLETE: 6,
@@ -170,7 +203,6 @@ export function useAutomatedBuilderFlow(
     sessionStatus,
     send,
     subscribe,
-    // connected is available if needed for future use
     autoDetectProduct,
     isAutoDetecting,
     selectedElement,
@@ -190,15 +222,23 @@ export function useAutomatedBuilderFlow(
   const [paginationCandidates, setPaginationCandidates] = useState<PaginationCandidate[]>([]);
   const [isPaginationDetecting, setIsPaginationDetecting] = useState(false);
 
-  // Track if we've started pagination detection
-  const paginationStartedRef = useRef(false);
-  // Track if labeling is complete (waiting for pagination)
-  const labelingCompleteRef = useRef(false);
+  // Pagination demo state
+  const [demoProgress, setDemoProgress] = useState<DemoProgressState>({
+    productCount: 0,
+    productDelta: 0,
+    accumulatedScroll: 0,
+    wrongNavWarning: false,
+    shouldAutoComplete: false,
+  });
+  const [demoResult, setDemoResult] = useState<DemoPaginationResult | null>(null);
+
+  // Store item selector for pagination demo
+  const itemSelectorRef = useRef<string | undefined>(undefined);
 
   // Timer ref for popup detection delay
   const popupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // State transition logic
+  // State transition logic - NEW FLOW: Products FIRST, then Pagination
   const transition = useCallback((event: BuilderEvent) => {
     setState((currentState) => {
       switch (currentState) {
@@ -209,26 +249,12 @@ export function useAutomatedBuilderFlow(
           if (event === 'SESSION_CREATED') return 'POPUP_DETECTION';
           break;
         case 'POPUP_DETECTION':
-          // After popups handled, go to pagination detection first
-          if (event === 'POPUP_YES') return 'PAGINATION_DETECTING';
+          // After popups, go to PRODUCT detection (not pagination!)
+          if (event === 'POPUP_YES') return 'AUTO_DETECTING_PRODUCT';
           if (event === 'POPUP_NO') return 'POPUP_RECORDING';
           break;
         case 'POPUP_RECORDING':
           if (event === 'DONE_RECORDING') return 'POPUP_DETECTION';
-          break;
-        case 'PAGINATION_DETECTING':
-          if (event === 'PAGINATION_DETECTED') {
-            return 'PAGINATION_CONFIRMATION';
-          }
-          break;
-        case 'PAGINATION_CONFIRMATION':
-          // After pagination confirmed, go to product detection
-          if (event === 'PAGINATION_YES') return 'AUTO_DETECTING_PRODUCT';
-          if (event === 'PAGINATION_NO') return 'PAGINATION_MANUAL';
-          break;
-        case 'PAGINATION_MANUAL':
-          // After manual pagination config, go to product detection
-          if (event === 'PAGINATION_CONFIGURED') return 'AUTO_DETECTING_PRODUCT';
           break;
         case 'AUTO_DETECTING_PRODUCT':
           if (event === 'PRODUCT_DETECTED') return 'PRODUCT_CONFIRMATION';
@@ -241,8 +267,24 @@ export function useAutomatedBuilderFlow(
           if (event === 'MANUAL_SELECTED') return 'LABELING';
           break;
         case 'LABELING':
-          // After labeling, go directly to final config
-          if (event === 'LABELS_APPLIED') return 'FINAL_CONFIG';
+          // After labeling, go to pagination demo (user demonstrates pagination)
+          if (event === 'LABELS_APPLIED') return 'PAGINATION_DEMO';
+          break;
+        case 'PAGINATION_DEMO':
+          // Demo mode - user scrolls or clicks to show pagination
+          if (event === 'DEMO_SUCCESS') return 'PAGINATION_DEMO_SUCCESS';
+          if (event === 'DEMO_FAILED') return 'PAGINATION_DEMO'; // Stay in demo to retry
+          if (event === 'PAGINATION_SKIPPED') return 'FINAL_CONFIG';
+          break;
+        case 'PAGINATION_DEMO_SUCCESS':
+          // User saw demo result and can confirm or retry
+          if (event === 'DEMO_CONFIRMED') return 'FINAL_CONFIG';
+          if (event === 'DEMO_RETRY') return 'PAGINATION_DEMO';
+          if (event === 'PAGINATION_SKIPPED') return 'FINAL_CONFIG';
+          break;
+        case 'PAGINATION_MANUAL':
+          if (event === 'PAGINATION_CONFIGURED') return 'FINAL_CONFIG';
+          if (event === 'PAGINATION_SKIPPED') return 'FINAL_CONFIG';
           break;
         case 'FINAL_CONFIG':
           if (event === 'SAVE_CLICKED') return 'SAVING';
@@ -261,9 +303,7 @@ export function useAutomatedBuilderFlow(
 
   // Watch for session status changes - auto-close popups when ready
   useEffect(() => {
-    // Trigger when session becomes ready (page loaded)
     if (state === 'LAUNCHING_BROWSER' && sessionStatus === 'ready' && sessionId) {
-      // Wait 3 seconds for popups to naturally appear, then auto-close them
       popupTimerRef.current = setTimeout(() => {
         console.log('[AutomatedFlow] Triggering popup auto-close...');
         send('popup:autoClose', {}, sessionId);
@@ -283,14 +323,11 @@ export function useAutomatedBuilderFlow(
       console.log('[AutomatedFlow] Popup close result:', msg.payload);
 
       if (msg.payload.success) {
-        // Store any dismiss actions that were recorded
         if (msg.payload.dismissActions && msg.payload.dismissActions.length > 0) {
           setDismissActions(msg.payload.dismissActions);
         }
       }
 
-      // Always show the popup confirmation overlay so user can verify
-      // They can click Yes if all popups are closed, or No to manually close more
       transition('SESSION_CREATED');
     });
 
@@ -308,12 +345,12 @@ export function useAutomatedBuilderFlow(
         setOverlayType('product');
         setShowOverlay(true);
         break;
-      case 'PAGINATION_DETECTING':
-        setOverlayType('pagination_detecting');
+      case 'PAGINATION_DEMO':
+        setOverlayType('pagination_demo');
         setShowOverlay(true);
         break;
-      case 'PAGINATION_CONFIRMATION':
-        setOverlayType('pagination');
+      case 'PAGINATION_DEMO_SUCCESS':
+        setOverlayType('pagination_demo_success');
         setShowOverlay(true);
         break;
       default:
@@ -338,7 +375,6 @@ export function useAutomatedBuilderFlow(
           setProductConfidence(msg.payload.confidence || 0);
           setProductScreenshot(msg.payload.screenshot || null);
         } else {
-          // Even on failure, show confirmation (user can select manually)
           setDetectedProduct(null);
           setProductConfidence(0);
           setProductScreenshot(null);
@@ -358,54 +394,84 @@ export function useAutomatedBuilderFlow(
     }
   }, [state, selectedElement, transition]);
 
-  // Subscribe to pagination detection result
+  // Subscribe to pagination demo events
   useEffect(() => {
-    const unsubscribe = subscribe('pagination:result', (msg) => {
-      console.log('[AutomatedFlow] Pagination result received:', msg.payload);
-      setIsPaginationDetecting(false);
+    // Demo started - server is ready for user input
+    const unsubDemoStarted = subscribe('pagination:demoStarted', (msg) => {
+      console.log('[AutomatedFlow] Pagination demo started:', msg.payload);
+      setDemoProgress({
+        productCount: msg.payload.productCount,
+        productDelta: 0,
+        accumulatedScroll: 0,
+        wrongNavWarning: false,
+        shouldAutoComplete: false,
+      });
+      setDemoResult(null);
+    });
 
-      if (msg.payload.success) {
-        const { candidates, method, pagination } = msg.payload;
+    // Demo progress - scroll or click happened
+    const unsubDemoProgress = subscribe('pagination:demoProgress', (msg) => {
+      console.log('[AutomatedFlow] Pagination demo progress:', msg.payload);
+      setDemoProgress((prev) => ({
+        ...prev,
+        productCount: msg.payload.currentCount,
+        productDelta: msg.payload.delta,
+        accumulatedScroll: msg.payload.accumulatedScroll ?? prev.accumulatedScroll,
+        lastClickedSelector: msg.payload.selector ?? prev.lastClickedSelector,
+        wrongNavWarning: msg.payload.wrongNavigation ?? false,
+        shouldAutoComplete: msg.payload.shouldAutoComplete ?? false,
+      }));
+    });
 
-        if (candidates && candidates.length > 0) {
-          setPaginationCandidates(candidates);
-        }
+    // Wrong navigation warning
+    const unsubWrongNav = subscribe('pagination:demoWrongNav', (msg) => {
+      console.log('[AutomatedFlow] Wrong navigation detected:', msg.payload);
+      setDemoProgress((prev) => ({
+        ...prev,
+        wrongNavWarning: true,
+      }));
+      // Clear warning after 3 seconds
+      setTimeout(() => {
+        setDemoProgress((prev) => ({ ...prev, wrongNavWarning: false }));
+      }, 3000);
+    });
 
-        // Use the smart detection result directly
-        if (pagination) {
-          console.log('[AutomatedFlow] Smart detection found method:', method);
-          const paginationPattern: PaginationPattern = {
-            type: pagination.type,
-            selector: pagination.selector || undefined,
-            scrollPositions: pagination.scrollPositions,
-            productsPerPage: pagination.productsPerPage,
-            max_pages: 10,
-          };
-          // Include offset config if detected (for URL-based offset pagination)
-          if (pagination.offset) {
-            paginationPattern.offset = {
-              key: pagination.offset.key,
-              start: pagination.offset.start,
-              increment: pagination.offset.increment,
-            };
-            console.log(`[AutomatedFlow] Offset pattern detected: ${pagination.offset.key}=${pagination.offset.start} (increment: ${pagination.offset.increment})`);
-          }
-          setDetectedPagination(paginationPattern);
-        } else {
-          console.log('[AutomatedFlow] No pagination method found');
-          setDetectedPagination(null);
-        }
-      }
+    // Demo result (auto-complete or manual complete)
+    const unsubDemoResult = subscribe('pagination:demoResult', (msg) => {
+      console.log('[AutomatedFlow] Pagination demo result:', msg.payload);
+      const result: DemoPaginationResult = {
+        method: msg.payload.method,
+        scrollDistance: msg.payload.scrollDistance,
+        clickSelector: msg.payload.clickSelector,
+        clickCoordinates: msg.payload.clickCoordinates,
+        beforeProductCount: msg.payload.beforeProductCount,
+        afterProductCount: msg.payload.afterProductCount,
+        productDelta: msg.payload.productDelta,
+        verified: msg.payload.verified,
+      };
+      setDemoResult(result);
 
-      // Transition to pagination confirmation when detection is complete
-      if (state === 'PAGINATION_DETECTING') {
-        console.log('[AutomatedFlow] Detection complete, transitioning to confirmation');
-        transition('PAGINATION_DETECTED');
+      if (result.verified) {
+        transition('DEMO_SUCCESS');
+      } else {
+        // Stay in demo mode for retry - don't transition
+        console.log('[AutomatedFlow] Demo failed - no product increase detected');
       }
     });
 
-    return unsubscribe;
-  }, [subscribe, state, transition]);
+    // Demo error
+    const unsubDemoError = subscribe('pagination:demoError', (msg) => {
+      console.error('[AutomatedFlow] Pagination demo error:', msg.payload);
+    });
+
+    return () => {
+      unsubDemoStarted();
+      unsubDemoProgress();
+      unsubWrongNav();
+      unsubDemoResult();
+      unsubDemoError();
+    };
+  }, [subscribe, transition]);
 
   // Start browser
   const startBrowser = useCallback(() => {
@@ -446,42 +512,57 @@ export function useAutomatedBuilderFlow(
     [transition]
   );
 
-  // Store item selector for pagination detection
-  const itemSelectorRef = useRef<string | undefined>(undefined);
-
-  // Auto-trigger pagination detection when entering PAGINATION_DETECTING state
-  // Note: pagination now runs BEFORE product detection, so no item selector available yet
-  useEffect(() => {
-    if (state === 'PAGINATION_DETECTING' && !isPaginationDetecting && sessionId) {
-      console.log('[AutomatedFlow] Starting pagination detection (before product card selection)');
-      setIsPaginationDetecting(true);
-      // No item selector yet since pagination runs before product detection
-      send('pagination:autoStart', { itemSelector: undefined }, sessionId);
-    }
-  }, [state, isPaginationDetecting, sessionId, send]);
-
-  // Called when labels are applied - now goes directly to final config
-  const proceedToFinalConfig = useCallback((itemSelector?: string) => {
-    console.log('[AutomatedFlow] Labels applied, proceeding to final config');
+  // Called when labels are applied - triggers pagination demo
+  const proceedToPaginationDemo = useCallback((itemSelector: string) => {
+    console.log('[AutomatedFlow] Labels applied, proceeding to pagination demo with itemSelector:', itemSelector);
     itemSelectorRef.current = itemSelector;
     transition('LABELS_APPLIED');
   }, [transition]);
 
-  // Pagination confirmation handlers
-  const handlePaginationConfirm = useCallback(
-    (correct: boolean) => {
-      if (correct) {
-        transition('PAGINATION_YES');
+  // Handle demo confirmation (user confirms the demonstrated method)
+  const handleDemoConfirm = useCallback(
+    (confirmed: boolean) => {
+      if (confirmed && demoResult) {
+        // Convert demo result to PaginationPattern for saving
+        setDetectedPagination({
+          type: demoResult.method === 'scroll' ? 'infinite_scroll' : 'next_page',
+          selector: demoResult.clickSelector,
+          scrollPositions: demoResult.method === 'scroll' && demoResult.scrollDistance
+            ? [demoResult.scrollDistance]
+            : undefined,
+          productsPerPage: demoResult.productDelta,
+          max_pages: 10,
+        });
+        transition('DEMO_CONFIRMED');
       } else {
-        transition('PAGINATION_NO');
+        // User wants to retry
+        transition('DEMO_RETRY');
       }
     },
-    [transition]
+    [transition, demoResult]
   );
 
-  // Select a pagination candidate
+  // Retry the demo
+  const retryDemo = useCallback(() => {
+    setDemoResult(null);
+    setDemoProgress({
+      productCount: 0,
+      productDelta: 0,
+      accumulatedScroll: 0,
+      wrongNavWarning: false,
+      shouldAutoComplete: false,
+    });
+    transition('DEMO_RETRY');
+  }, [transition]);
+
+  // Skip pagination entirely
+  const skipPagination = useCallback(() => {
+    setDetectedPagination(null);
+    transition('PAGINATION_SKIPPED');
+  }, [transition]);
+
+  // Select a pagination candidate (legacy support)
   const selectPaginationCandidate = useCallback((candidate: PaginationCandidate) => {
-    // Map PaginationCandidate type to PaginationPattern type
     let paginationType: 'url_pattern' | 'next_page' | 'infinite_scroll' = 'next_page';
     if (candidate.type === 'load_more') {
       paginationType = 'infinite_scroll';
@@ -525,8 +606,15 @@ export function useAutomatedBuilderFlow(
     setDetectedPagination(null);
     setPaginationCandidates([]);
     setIsPaginationDetecting(false);
-    paginationStartedRef.current = false;
-    labelingCompleteRef.current = false;
+    setDemoProgress({
+      productCount: 0,
+      productDelta: 0,
+      accumulatedScroll: 0,
+      wrongNavWarning: false,
+      shouldAutoComplete: false,
+    });
+    setDemoResult(null);
+    itemSelectorRef.current = undefined;
   }, [transition]);
 
   return {
@@ -540,16 +628,21 @@ export function useAutomatedBuilderFlow(
     detectedPagination,
     paginationCandidates,
     isPaginationDetecting,
+    // Pagination demo data
+    demoProgress,
+    demoResult,
     transition,
     handlePopupConfirm,
     handleProductConfirm,
-    handlePaginationConfirm,
+    handleDemoConfirm,
     startBrowser,
     addDismissAction,
     finishDismissRecording,
     selectPaginationCandidate,
     setPaginationManual,
-    proceedToFinalConfig,
+    proceedToPaginationDemo,
+    retryDemo,
+    skipPagination,
     startSaving,
     completeSave,
     reset,

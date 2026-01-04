@@ -15,11 +15,20 @@ interface LabeledItem {
   item: ExtractedItem;
 }
 
+// AI label from server
+interface AILabel {
+  index: number;
+  field: string; // 'title' | 'price' | 'original_price' | 'url' | 'image' | 'skip'
+  confidence: number;
+  reason?: string;
+}
+
 interface ExtractedContentLabelerProps {
   items: ExtractedItem[];
   containerSelector: string;
   onSaveLabels: (labels: LabeledItem[], containerSelector: string) => void;
   onCancel: () => void;
+  aiLabels?: AILabel[]; // AI-generated labels from server
 }
 
 const FIELD_OPTIONS: { field: FieldType; label: string; color: string }[] = [
@@ -38,12 +47,24 @@ function autoDetectAssignments(items: ExtractedItem[]): Record<number, FieldType
   let hasUrl = false;
   let hasImage = false;
 
+  // Count links to determine if we should auto-assign URL
+  const linkItems = items.filter(item => item.type === 'link');
+
   items.forEach((item, index) => {
-    // Auto-detect URL: links containing /product/, /p/, /item/, /dp/ (Amazon), etc.
+    // Auto-detect URL: links containing product patterns OR the only link in container
     if (item.type === 'link' && !hasUrl) {
-      const urlPatterns = ['/product/', '/p/', '/item/', '/dp/', '/pd/', '/products/', '/goods/'];
+      const urlPatterns = ['/product/', '/p/', '/item/', '/dp/', '/pd/', '/products/', '/goods/', '/l/'];
       const isProductUrl = urlPatterns.some(pattern => item.value.toLowerCase().includes(pattern));
-      if (isProductUrl) {
+
+      // Also auto-detect if:
+      // 1. It matches product URL patterns, OR
+      // 2. The selector is empty or ':self' (container IS the link), OR
+      // 3. The selector is ':parent-link' (container is inside a link), OR
+      // 4. This is the ONLY link in the container
+      const isContainerLink = item.selector === '' || item.selector === ':self' || item.selector === ':parent-link';
+      const isOnlyLink = linkItems.length === 1;
+
+      if (isProductUrl || isContainerLink || isOnlyLink) {
         assignments[index] = 'URL';
         hasUrl = true;
         return;
@@ -84,22 +105,65 @@ function autoDetectAssignments(items: ExtractedItem[]): Record<number, FieldType
   return assignments;
 }
 
+// Convert AI labels to field assignments
+function convertAILabelsToAssignments(aiLabels: AILabel[]): Record<number, FieldType> {
+  const assignments: Record<number, FieldType> = {};
+
+  // Map AI field names to our FieldType (capitalize first letter)
+  const fieldMap: Record<string, FieldType> = {
+    'title': 'Title',
+    'price': 'Price',
+    'original_price': 'Price', // We treat original_price as Price (could be extended later)
+    'sale_price': 'Price',
+    'url': 'URL',
+    'image': 'Image',
+    'skip': 'Skip',
+  };
+
+  for (const label of aiLabels) {
+    const mappedField = fieldMap[label.field.toLowerCase()];
+    if (mappedField) {
+      assignments[label.index] = mappedField;
+    }
+  }
+
+  return assignments;
+}
+
 export function ExtractedContentLabeler({
   items,
   containerSelector,
   onSaveLabels,
   onCancel,
+  aiLabels,
 }: ExtractedContentLabelerProps) {
   // Track which field each item is assigned to - initialize with auto-detected assignments
   const [assignments, setAssignments] = useState<Record<number, FieldType>>({});
+  // Whether to show items marked as skip
+  const [showSkipItems, setShowSkipItems] = useState(false);
+  // Whether AI labels have been applied (for confirmation UI)
+  const [aiLabelsApplied, setAiLabelsApplied] = useState(false);
 
-  // Run auto-detection on mount
+  // Use AI labels if provided, otherwise fall back to basic auto-detection
   useEffect(() => {
-    const autoAssigned = autoDetectAssignments(items);
-    if (Object.keys(autoAssigned).length > 0) {
-      setAssignments(autoAssigned);
+    if (aiLabels && aiLabels.length > 0) {
+      // Use AI-generated labels
+      console.log('[Labeler] Using AI labels:', aiLabels.length, 'labels');
+      const aiAssigned = convertAILabelsToAssignments(aiLabels);
+      setAssignments(aiAssigned);
+      setAiLabelsApplied(true);
+      setShowSkipItems(false); // Hide skip items by default when AI labels arrive
+    } else {
+      // Fall back to basic auto-detection
+      console.log('[Labeler] No AI labels, using basic auto-detection');
+      const autoAssigned = autoDetectAssignments(items);
+      if (Object.keys(autoAssigned).length > 0) {
+        setAssignments(autoAssigned);
+      }
+      setAiLabelsApplied(false);
+      setShowSkipItems(true); // Show all items when no AI labels
     }
-  }, [items]);
+  }, [items, aiLabels]);
 
   const handleAssign = (index: number, field: FieldType) => {
     setAssignments((prev) => {
@@ -130,12 +194,22 @@ export function ExtractedContentLabeler({
     (k) => assignments[parseInt(k, 10)] !== 'Skip'
   ).length;
 
+  const skippedCount = Object.keys(assignments).filter(
+    (k) => assignments[parseInt(k, 10)] === 'Skip'
+  ).length;
+
   // Group items by type for better organization, keeping track of original indices
+  // Filter out skip items if showSkipItems is false
   const textItems: { item: ExtractedItem; originalIndex: number }[] = [];
   const linkItems: { item: ExtractedItem; originalIndex: number }[] = [];
   const imageItems: { item: ExtractedItem; originalIndex: number }[] = [];
 
   items.forEach((item, index) => {
+    // Skip items marked as 'Skip' if we're hiding them
+    if (!showSkipItems && assignments[index] === 'Skip') {
+      return;
+    }
+
     if (item.type === 'text') {
       textItems.push({ item, originalIndex: index });
     } else if (item.type === 'link') {
@@ -267,10 +341,36 @@ export function ExtractedContentLabeler({
           background: 'var(--bg-secondary)',
         }}
       >
-        <h3 style={{ margin: '0 0 8px 0', fontSize: '1rem' }}>Label Product Data</h3>
-        <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-          Found {items.length} items in the selected container. Click buttons to assign each to a field.
-        </p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <h3 style={{ margin: '0 0 8px 0', fontSize: '1rem' }}>
+              {aiLabelsApplied ? '✨ AI Labels Applied' : 'Label Product Data'}
+            </h3>
+            <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+              {aiLabelsApplied
+                ? `AI detected ${assignedCount} field${assignedCount !== 1 ? 's' : ''} and skipped ${skippedCount} item${skippedCount !== 1 ? 's' : ''}. Review and confirm.`
+                : `Found ${items.length} items in the selected container. Click buttons to assign each to a field.`
+              }
+            </p>
+          </div>
+          {aiLabelsApplied && skippedCount > 0 && (
+            <button
+              onClick={() => setShowSkipItems(!showSkipItems)}
+              style={{
+                padding: '6px 12px',
+                fontSize: '0.75rem',
+                background: showSkipItems ? 'var(--bg-primary)' : 'transparent',
+                border: '1px solid var(--border-color)',
+                color: 'var(--text-secondary)',
+                cursor: 'pointer',
+                borderRadius: '4px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {showSkipItems ? 'Hide' : 'Show'} {skippedCount} skipped
+            </button>
+          )}
+        </div>
         <div
           style={{
             marginTop: '8px',
@@ -361,7 +461,8 @@ export function ExtractedContentLabeler({
         }}
       >
         <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-          {assignedCount} item{assignedCount !== 1 ? 's' : ''} labeled
+          {assignedCount} field{assignedCount !== 1 ? 's' : ''} to extract
+          {aiLabelsApplied && ` (${skippedCount} skipped)`}
         </span>
         <div style={{ display: 'flex', gap: '10px' }}>
           <button
@@ -388,7 +489,7 @@ export function ExtractedContentLabeler({
               fontWeight: 600,
             }}
           >
-            Apply Labels
+            {aiLabelsApplied ? 'Confirm & Apply' : 'Apply Labels'}
           </button>
         </div>
       </div>

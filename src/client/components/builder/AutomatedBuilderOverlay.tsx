@@ -4,7 +4,11 @@
 
 import { useEffect, useCallback } from 'react';
 import type { ElementSelector } from '../../../shared/types';
-import type { OverlayType, PaginationPattern } from '../../hooks/useAutomatedBuilderFlow';
+import type {
+  OverlayType,
+  DemoProgressState,
+  DemoPaginationResult,
+} from '../../hooks/useAutomatedBuilderFlow';
 
 interface AutomatedBuilderOverlayProps {
   type: OverlayType;
@@ -19,8 +23,11 @@ interface AutomatedBuilderOverlayProps {
   productConfidence?: number;
   productScreenshot?: string | null;
 
-  // Pagination-specific
-  detectedPagination?: PaginationPattern | null;
+  // Pagination demo props
+  demoProgress?: DemoProgressState;
+  demoResult?: DemoPaginationResult | null;
+  onRetryDemo?: () => void;
+  onSkipPagination?: () => void;
 }
 
 export function AutomatedBuilderOverlay({
@@ -31,15 +38,41 @@ export function AutomatedBuilderOverlay({
   detectedProduct,
   productConfidence = 0,
   productScreenshot,
-  detectedPagination,
+  demoProgress,
+  demoResult,
+  onRetryDemo,
+  onSkipPagination,
 }: AutomatedBuilderOverlayProps) {
   // Handle keyboard shortcuts
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (!isVisible) return;
-      // Don't handle keyboard during pagination detection
-      if (type === 'pagination_detecting') return;
 
+      // Skip pagination (S key) - works in demo and success modes
+      if (e.key === 's' || e.key === 'S') {
+        if ((type === 'pagination_demo' || type === 'pagination_demo_success') && onSkipPagination) {
+          e.preventDefault();
+          onSkipPagination();
+        }
+        return;
+      }
+
+      // During demo mode, only allow skip - user interaction happens in browser view
+      if (type === 'pagination_demo') return;
+
+      // Demo success mode keyboard shortcuts
+      if (type === 'pagination_demo_success') {
+        if (e.key === 'Enter' || e.key === 'y' || e.key === 'Y') {
+          e.preventDefault();
+          onConfirm(true); // Confirm the demo result
+        } else if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          onRetryDemo?.(); // Retry demo
+        }
+        return;
+      }
+
+      // Standard confirm/reject for other overlays
       if (e.key === 'Enter' || e.key === 'y' || e.key === 'Y') {
         e.preventDefault();
         onConfirm(true);
@@ -48,7 +81,7 @@ export function AutomatedBuilderOverlay({
         onConfirm(false);
       }
     },
-    [isVisible, type, onConfirm]
+    [isVisible, type, onConfirm, onRetryDemo, onSkipPagination]
   );
 
   useEffect(() => {
@@ -122,84 +155,126 @@ export function AutomatedBuilderOverlay({
           </>
         );
 
-      case 'pagination_detecting':
+      case 'pagination_demo':
         return (
           <>
-            <div className="overlay-icon overlay-spinning">
+            <div className="overlay-icon">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 12a9 9 0 11-6.219-8.56" />
+                <path d="M12 19V5M5 12l7-7 7 7" />
               </svg>
             </div>
-            <h2 className="overlay-title">Pagination Detection</h2>
+            <h2 className="overlay-title">Demonstrate Pagination</h2>
             <p className="overlay-description">
-              Scrolling through the page to detect how more products load...
+              Show us how to load more products:
             </p>
-            <p className="overlay-hint" style={{ marginTop: '8px' }}>
-              Please wait while we analyze the page structure.
+
+            <div className="demo-instructions">
+              <div className="demo-instruction">
+                <span className="demo-icon">↕️</span>
+                <span><strong>Scroll down</strong> until more products appear</span>
+              </div>
+              <div className="demo-instruction-or">OR</div>
+              <div className="demo-instruction">
+                <span className="demo-icon">👆</span>
+                <span><strong>Click</strong> the "Next" or "Load More" button</span>
+              </div>
+            </div>
+
+            {/* Live progress indicator */}
+            <div className="demo-status">
+              <div className="demo-product-count">
+                Products: <strong>{demoProgress?.productCount || 0}</strong>
+                {(demoProgress?.productDelta ?? 0) > 0 && (
+                  <span className="demo-delta-badge">+{demoProgress?.productDelta} new!</span>
+                )}
+              </div>
+
+              {/* Show detected method */}
+              {(demoProgress?.accumulatedScroll ?? 0) > 0 && (
+                <p className="demo-method-hint">
+                  Scroll detected: {Math.abs(demoProgress?.accumulatedScroll || 0)}px
+                </p>
+              )}
+              {demoProgress?.lastClickedSelector && (
+                <p className="demo-method-hint">
+                  Click detected: <code>{demoProgress.lastClickedSelector}</code>
+                </p>
+              )}
+
+              {/* Auto-completing indicator */}
+              {demoProgress?.shouldAutoComplete && (
+                <p className="demo-auto-complete">
+                  ✓ New products detected! Auto-completing...
+                </p>
+              )}
+
+              {/* Wrong navigation warning */}
+              {demoProgress?.wrongNavWarning && (
+                <p className="demo-wrong-nav-warning">
+                  ⚠️ That navigated away from the page. We went back automatically.
+                  Try clicking a different element.
+                </p>
+              )}
+            </div>
+
+            <div className="overlay-actions">
+              {onSkipPagination && (
+                <button
+                  className="overlay-btn overlay-btn-skip"
+                  onClick={onSkipPagination}
+                >
+                  Skip Pagination
+                  <span className="overlay-key-hint">S</span>
+                </button>
+              )}
+            </div>
+
+            <p className="overlay-hint">
+              The system will auto-complete when new products are detected.
             </p>
           </>
         );
 
-      case 'pagination':
-        const isInfiniteScroll = detectedPagination?.type === 'infinite_scroll';
-        const isNextPage = detectedPagination?.type === 'next_page';
-        const isUrlPattern = detectedPagination?.type === 'url_pattern';
-
-        // Get user-friendly description
-        const getPaginationDescription = () => {
-          if (isInfiniteScroll) {
-            return 'More products load automatically when you scroll down the page.';
-          }
-          if (isNextPage) {
-            return 'Products are split across multiple pages. Click "Next" to see more products.';
-          }
-          if (isUrlPattern) {
-            return 'Products are split across multiple pages with numbered page links.';
-          }
-          return '';
-        };
-
-        // Get icon based on type
-        const getPaginationIcon = () => {
-          if (isInfiniteScroll) {
-            return (
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 5v14M5 12l7 7 7-7" />
-              </svg>
-            );
-          }
-          return (
-            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M15 18l-6-6 6-6" />
-              <path d="M9 18l6-6-6-6" transform="translate(6, 0)" />
-            </svg>
-          );
-        };
-
-        // Get title based on type
-        const getPaginationTitle = () => {
-          if (isInfiniteScroll) return 'Infinite scroll detected!';
-          if (isNextPage) return '"Next" button detected!';
-          if (isUrlPattern) return 'Page numbers detected!';
-          return 'No pagination detected';
-        };
-
+      case 'pagination_demo_success':
+        const methodName = demoResult?.method === 'scroll' ? 'Infinite Scroll' : 'Click Button';
         return (
           <>
-            <div className="overlay-icon" style={{ color: detectedPagination ? 'var(--accent-success)' : 'var(--text-secondary)' }}>
-              {getPaginationIcon()}
+            <div className="overlay-icon" style={{ color: 'var(--accent-success)' }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
             </div>
-            <h2 className="overlay-title">{getPaginationTitle()}</h2>
-            {detectedPagination ? (
-              <div className="overlay-pagination-info">
-                <p className="overlay-pagination-description">
-                  {getPaginationDescription()}
-                </p>
+            <h2 className="overlay-title">Pagination Method Captured!</h2>
+
+            {demoResult && (
+              <div className="demo-result-details">
+                <div className="demo-result-row">
+                  <span className="demo-result-label">Method:</span>
+                  <span className="demo-result-value demo-method-badge">{methodName}</span>
+                </div>
+
+                {demoResult.method === 'scroll' && demoResult.scrollDistance && (
+                  <div className="demo-result-row">
+                    <span className="demo-result-label">Scroll Distance:</span>
+                    <span className="demo-result-value">{demoResult.scrollDistance}px</span>
+                  </div>
+                )}
+
+                {demoResult.method === 'click' && demoResult.clickSelector && (
+                  <div className="demo-result-row">
+                    <span className="demo-result-label">Button:</span>
+                    <code className="demo-result-value demo-selector">{demoResult.clickSelector}</code>
+                  </div>
+                )}
+
+                <div className="demo-result-row demo-result-products">
+                  <span className="demo-result-label">Products:</span>
+                  <span className="demo-result-value">
+                    {demoResult.beforeProductCount} → {demoResult.afterProductCount}
+                    <span className="demo-delta-badge">+{demoResult.productDelta}</span>
+                  </span>
+                </div>
               </div>
-            ) : (
-              <p className="overlay-description">
-                No pagination was detected. Click "No" to configure manually, or "Yes" if this page has all products.
-              </p>
             )}
           </>
         );
@@ -209,32 +284,72 @@ export function AutomatedBuilderOverlay({
     }
   };
 
-  // Don't show action buttons while detecting pagination
-  const showActions = type !== 'pagination_detecting';
+  // Demo mode has actions in content, success mode has standard actions
+  const showActions = type !== 'pagination_demo';
+
+  // Render action buttons based on overlay type
+  const renderActions = () => {
+    if (type === 'pagination_demo_success') {
+      return (
+        <div className="overlay-actions overlay-actions-demo">
+          {onRetryDemo && (
+            <button
+              className="overlay-btn overlay-btn-retry"
+              onClick={onRetryDemo}
+            >
+              Try Again
+              <span className="overlay-key-hint">R</span>
+            </button>
+          )}
+          {onSkipPagination && (
+            <button
+              className="overlay-btn overlay-btn-skip"
+              onClick={onSkipPagination}
+            >
+              Skip
+              <span className="overlay-key-hint">S</span>
+            </button>
+          )}
+          <button
+            className="overlay-btn overlay-btn-yes"
+            onClick={() => onConfirm(true)}
+          >
+            Use This
+            <span className="overlay-key-hint">Y / Enter</span>
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="overlay-actions">
+        <button
+          className="overlay-btn overlay-btn-no"
+          onClick={() => onConfirm(false)}
+        >
+          No
+          <span className="overlay-key-hint">N / Esc</span>
+        </button>
+        <button
+          className="overlay-btn overlay-btn-yes"
+          onClick={() => onConfirm(true)}
+        >
+          Yes
+          <span className="overlay-key-hint">Y / Enter</span>
+        </button>
+      </div>
+    );
+  };
+
+  // Demo mode uses a side panel that doesn't block the browser view
+  const isDemoMode = type === 'pagination_demo';
 
   return (
-    <div className="automated-overlay-backdrop">
-      <div className="automated-overlay-card">
+    <div className={`automated-overlay-backdrop ${isDemoMode ? 'demo-mode' : ''}`}>
+      <div className={`automated-overlay-card ${type === 'pagination_demo_success' ? 'overlay-card-wide' : ''} ${isDemoMode ? 'demo-mode-card' : ''}`}>
         {renderContent()}
 
-        {showActions && (
-          <div className="overlay-actions">
-            <button
-              className="overlay-btn overlay-btn-no"
-              onClick={() => onConfirm(false)}
-            >
-              No
-              <span className="overlay-key-hint">N / Esc</span>
-            </button>
-            <button
-              className="overlay-btn overlay-btn-yes"
-              onClick={() => onConfirm(true)}
-            >
-              Yes
-              <span className="overlay-key-hint">Y / Enter</span>
-            </button>
-          </div>
-        )}
+        {showActions && renderActions()}
       </div>
 
       <style>{`
@@ -250,6 +365,25 @@ export function AutomatedBuilderOverlay({
           justify-content: center;
           z-index: 10000;
           backdrop-filter: blur(4px);
+        }
+
+        /* Demo mode: position overlay on the left, don't block browser view */
+        .automated-overlay-backdrop.demo-mode {
+          background: transparent;
+          backdrop-filter: none;
+          pointer-events: none;
+          align-items: flex-start;
+          justify-content: flex-start;
+          padding: 20px;
+        }
+
+        .automated-overlay-card.demo-mode-card {
+          pointer-events: auto;
+          max-width: 380px;
+          padding: 24px;
+          margin-top: 60px;
+          box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+          border: 2px solid var(--accent-primary);
         }
 
         .automated-overlay-card {
@@ -433,6 +567,284 @@ export function AutomatedBuilderOverlay({
           font-size: 0.7em;
           font-weight: 400;
           opacity: 0.7;
+        }
+
+        /* Wide card for verification */
+        .overlay-card-wide {
+          max-width: 600px;
+        }
+
+        /* Pagination testing progress */
+        .overlay-test-progress {
+          margin: 16px 0;
+        }
+
+        .overlay-method-name {
+          font-size: 1.2em;
+          font-weight: 600;
+          color: var(--accent-primary);
+          margin: 8px 0 16px;
+        }
+
+        .overlay-progress-bar {
+          height: 6px;
+          background: var(--bg-tertiary);
+          border-radius: 3px;
+          overflow: hidden;
+        }
+
+        .overlay-progress-fill {
+          height: 100%;
+          background: var(--accent-primary);
+          transition: width 0.3s ease;
+        }
+
+        /* Verification content */
+        .overlay-verification-content {
+          margin: 16px 0;
+        }
+
+        .overlay-method-header {
+          display: flex;
+          justify-content: center;
+          gap: 12px;
+          margin-bottom: 16px;
+        }
+
+        .overlay-method-badge {
+          display: inline-block;
+          padding: 6px 12px;
+          background: var(--accent-primary);
+          color: white;
+          border-radius: 16px;
+          font-size: 0.9em;
+          font-weight: 500;
+        }
+
+        .overlay-confidence-badge {
+          display: inline-block;
+          padding: 6px 12px;
+          background: var(--bg-tertiary);
+          color: var(--text-secondary);
+          border-radius: 16px;
+          font-size: 0.9em;
+        }
+
+        .overlay-slider-container {
+          margin: 16px 0;
+          border-radius: 8px;
+          overflow: hidden;
+          border: 1px solid var(--border-color);
+        }
+
+        .overlay-product-delta {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 12px;
+          margin: 16px 0;
+          font-size: 1em;
+        }
+
+        .delta-before {
+          color: var(--text-secondary);
+        }
+
+        .delta-arrow {
+          color: var(--accent-primary);
+          font-weight: bold;
+        }
+
+        .delta-after {
+          color: var(--text-primary);
+          font-weight: 500;
+        }
+
+        .delta-gain {
+          color: var(--accent-success);
+          margin-left: 4px;
+        }
+
+        .overlay-reasoning {
+          font-size: 0.9em;
+          color: var(--text-secondary);
+          background: var(--bg-secondary);
+          padding: 12px 16px;
+          border-radius: 8px;
+          margin: 0;
+          line-height: 1.5;
+          text-align: left;
+        }
+
+        /* Demo overlay styles */
+        .demo-instructions {
+          background: var(--bg-secondary);
+          border: 1px solid var(--border-color);
+          border-radius: 8px;
+          padding: 16px;
+          margin: 16px 0;
+          text-align: left;
+        }
+
+        .demo-instruction {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 8px 0;
+        }
+
+        .demo-icon {
+          font-size: 1.5em;
+          width: 40px;
+          text-align: center;
+        }
+
+        .demo-instruction-or {
+          text-align: center;
+          color: var(--text-tertiary);
+          font-size: 0.9em;
+          padding: 4px 0;
+        }
+
+        .demo-status {
+          background: var(--bg-secondary);
+          border: 1px solid var(--border-color);
+          border-radius: 8px;
+          padding: 16px;
+          margin: 16px 0;
+        }
+
+        .demo-product-count {
+          font-size: 1.2em;
+          color: var(--text-primary);
+          margin-bottom: 8px;
+        }
+
+        .demo-delta-badge {
+          display: inline-block;
+          background: var(--accent-success);
+          color: white;
+          padding: 4px 10px;
+          border-radius: 12px;
+          font-size: 0.8em;
+          margin-left: 8px;
+          font-weight: 600;
+        }
+
+        .demo-method-hint {
+          font-size: 0.9em;
+          color: var(--text-secondary);
+          margin: 8px 0;
+        }
+
+        .demo-method-hint code {
+          background: var(--bg-primary);
+          padding: 2px 6px;
+          border-radius: 4px;
+          font-size: 0.85em;
+          color: var(--accent-primary);
+        }
+
+        .demo-auto-complete {
+          color: var(--accent-success);
+          font-weight: 500;
+          margin: 8px 0;
+        }
+
+        .demo-wrong-nav-warning {
+          color: var(--accent-warning);
+          background: rgba(255, 193, 7, 0.1);
+          padding: 10px 12px;
+          border-radius: 6px;
+          margin: 8px 0;
+          font-size: 0.9em;
+        }
+
+        /* Demo success styles */
+        .demo-result-details {
+          background: var(--bg-secondary);
+          border: 1px solid var(--border-color);
+          border-radius: 8px;
+          padding: 16px 20px;
+          margin: 16px 0;
+          text-align: left;
+        }
+
+        .demo-result-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 8px 0;
+          border-bottom: 1px solid var(--border-color);
+        }
+
+        .demo-result-row:last-child {
+          border-bottom: none;
+        }
+
+        .demo-result-label {
+          color: var(--text-secondary);
+          font-size: 0.9em;
+        }
+
+        .demo-result-value {
+          color: var(--text-primary);
+          font-weight: 500;
+        }
+
+        .demo-method-badge {
+          background: var(--accent-primary);
+          color: white;
+          padding: 4px 12px;
+          border-radius: 12px;
+        }
+
+        .demo-selector {
+          background: var(--bg-primary);
+          padding: 4px 8px;
+          border-radius: 4px;
+          font-size: 0.85em;
+          color: var(--accent-primary);
+          max-width: 200px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .demo-result-products {
+          margin-top: 8px;
+          padding-top: 12px;
+        }
+
+        /* Demo action buttons */
+        .overlay-actions-demo {
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+
+        .overlay-btn-retry {
+          background: var(--bg-tertiary);
+          color: var(--text-primary);
+          border: 1px solid var(--border-color);
+        }
+
+        .overlay-btn-retry:hover {
+          background: var(--accent-primary);
+          color: white;
+          border-color: var(--accent-primary);
+        }
+
+        .overlay-btn-skip {
+          background: transparent;
+          color: var(--text-secondary);
+          border: 1px solid var(--border-color);
+          min-width: auto;
+          padding: 14px 20px;
+        }
+
+        .overlay-btn-skip:hover {
+          background: var(--bg-tertiary);
+          color: var(--text-primary);
         }
       `}</style>
     </div>

@@ -6,6 +6,7 @@ import type { Page, CDPSession } from 'playwright';
 import type { ElementSelector, DOMHighlight, UrlHoverPayload, ContainerContentPayload, ExtractedContentItem } from '../../shared/types.js';
 import { ProductDetector } from './ProductDetector.js';
 import type { DetectionResult } from '../types/detection-types.js';
+import type { MultiStepDetectionResult, MultiStepDetectionConfig } from '../ai/types.js';
 
 // Script injected into the page for DOM inspection
 const DOM_INSPECTION_SCRIPT = `
@@ -610,8 +611,9 @@ const DOM_INSPECTION_SCRIPT = `
         }
 
         // Check for common meaningful class at this depth
+        // Note: We don't exclude underscores because CSS Modules use them (e.g., price_singlePrice__hTG4o)
         const firstClasses = ancestorsAtDepth[0].classes.filter(c =>
-          !c.match(/^[0-9]|hover|active|focus|selected|current|open|close|ng-|_|js-/i) &&
+          !c.match(/^[0-9]|^hover$|^active$|^focus$|^selected$|^current$|^open$|^close$|^ng-|^js-|^is-|^has-/i) &&
           c.length > 2
         );
         for (const cls of firstClasses) {
@@ -653,10 +655,11 @@ const DOM_INSPECTION_SCRIPT = `
         }
 
         // 3. Try with intermediate class if available
+        // Note: We don't exclude underscores because CSS Modules use them (e.g., price_singlePrice__hTG4o)
         for (let i = remainingPath.length - 1; i >= 0; i--) {
           const node = remainingPath[i];
           const meaningfulClass = node.classes.find(c =>
-            !c.match(/^[0-9]|hover|active|focus|selected|current|open|close|ng-|_|js-/i) &&
+            !c.match(/^[0-9]|^hover$|^active$|^focus$|^selected$|^current$|^open$|^close$|^ng-|^js-|^is-|^has-/i) &&
             c.length > 2
           );
           if (meaningfulClass) {
@@ -1293,7 +1296,9 @@ export class DOMInspector {
           // Try class-based selector with ALL valid classes first
           if (el.classList && el.classList.length > 0) {
             var validClasses = Array.from(el.classList).filter(function(c) {
-              return !c.match(/^[0-9]|hover|active|focus|selected|current|open|close|ng-|_|js-/i);
+              // Filter out dynamic/state classes but KEEP classes with underscores (common in CSS modules)
+              // Only exclude classes that START with js- or ng- or are state classes
+              return !c.match(/^[0-9]|^hover$|^active$|^focus$|^selected$|^current$|^open$|^close$|^ng-|^js-|^is-|^has-/i);
             });
 
             if (validClasses.length > 0) {
@@ -1551,7 +1556,7 @@ export class DOMInspector {
               addItem({
                 type: 'link',
                 value: containerUrl,
-                selector: '',
+                selector: ':self',  // Special selector indicating the container itself is the link
                 displayText: containerUrl.length > 60 ? containerUrl.substring(0, 60) + '...' : containerUrl,
                 tagName: 'a'
               });
@@ -1733,6 +1738,113 @@ export class DOMInspector {
       console.error('[DOMInspector] AI auto-detect error:', error);
       // Fall back to legacy detection on error
       return this.legacyAutoDetectProduct() as any;
+    }
+  }
+
+  /**
+   * Auto-detect product using multi-step AI pipeline for maximum accuracy.
+   * Uses a 6-step verification pipeline with iterative refinement.
+   * Falls back to single-AI detection or ML if pipeline fails.
+   */
+  async autoDetectProductWithMultiStepAI(
+    config?: Partial<MultiStepDetectionConfig>
+  ): Promise<(ElementSelector & {
+    confidence: number;
+    fallbackRecommended: boolean;
+    source: MultiStepDetectionResult['source'];
+    iterations: number;
+    pipeline: MultiStepDetectionResult['pipeline'];
+  }) | null> {
+    await this.inject();
+
+    // Check if this is a Zara page - use Zara-specific detection
+    const currentUrl = this.page.url();
+    if (currentUrl.includes('zara.com')) {
+      const zaraResult = await this.autoDetectZaraProduct();
+      if (zaraResult) {
+        return {
+          ...zaraResult,
+          confidence: 0.9,
+          fallbackRecommended: false,
+          source: 'ml' as const,
+          iterations: 0,
+          pipeline: {
+            gridDetected: false,
+            candidatesGenerated: 0,
+            refinementIterations: 0,
+            verified: false,
+          },
+        };
+      }
+      return null;
+    }
+
+    console.log('[DOMInspector] Using multi-step AI product detection pipeline');
+
+    try {
+      // Use the multi-step AI pipeline
+      const result = await this.productDetector.detectProductWithMultiStepAI(config);
+
+      if (!result.selector) {
+        console.log('[DOMInspector] Multi-step AI detection returned no selector');
+        return null;
+      }
+
+      console.log(`[DOMInspector] Multi-step AI detected: ${result.selector}`);
+      console.log(`[DOMInspector] Source: ${result.source}, Iterations: ${result.iterations}`);
+      console.log(`[DOMInspector] Pipeline: grid=${result.pipeline.gridDetected}, candidates=${result.pipeline.candidatesGenerated}, refinements=${result.pipeline.refinementIterations}, verified=${result.pipeline.verified}`);
+      console.log(`[DOMInspector] Confidence: ${(result.confidence * 100).toFixed(0)}%`);
+
+      // Get bounding box for the first matched element
+      const boundingBox = await this.page.evaluate((selector) => {
+        try {
+          const el = document.querySelector(selector);
+          if (!el) return { x: 0, y: 0, width: 0, height: 0 };
+          const rect = el.getBoundingClientRect();
+          return {
+            x: rect.left + window.scrollX,
+            y: rect.top + window.scrollY,
+            width: rect.width,
+            height: rect.height,
+          };
+        } catch {
+          return { x: 0, y: 0, width: 0, height: 0 };
+        }
+      }, result.selector);
+
+      // Return in the expected ElementSelector format with multi-step metadata
+      return {
+        tagName: '',
+        css: result.genericSelector,
+        cssSpecific: result.selector,
+        boundingBox,
+        text: '',
+        attributes: {},
+        confidence: result.confidence,
+        fallbackRecommended: result.confidence < 0.6,
+        source: result.source,
+        iterations: result.iterations,
+        pipeline: result.pipeline,
+      };
+
+    } catch (error) {
+      console.error('[DOMInspector] Multi-step AI detection error:', error);
+      // Fall back to single AI detection on error
+      const fallbackResult = await this.autoDetectProductWithAI();
+      if (fallbackResult) {
+        return {
+          ...fallbackResult,
+          source: fallbackResult.source === 'ai' ? 'single-ai' as const : fallbackResult.source,
+          iterations: 0,
+          pipeline: {
+            gridDetected: false,
+            candidatesGenerated: 0,
+            refinementIterations: 0,
+            verified: false,
+          },
+        };
+      }
+      return null;
     }
   }
 

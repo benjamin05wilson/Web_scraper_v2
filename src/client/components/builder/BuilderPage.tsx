@@ -78,6 +78,7 @@ export function BuilderPage() {
     toggleSelectionMode,
     autoDetectProduct,
     isAutoDetecting,
+    aiLabels,
   } = session;
 
   // Automated builder flow state machine
@@ -388,6 +389,56 @@ export function BuilderPage() {
     };
   }, [sessionId, send, frameData]);
 
+  // Start pagination demo when entering demo mode
+  useEffect(() => {
+    if (flow.state === 'PAGINATION_DEMO' && sessionId && containerSelector) {
+      console.log('[BuilderPage] Starting pagination demo with itemSelector:', containerSelector);
+      send('pagination:startDemo', { itemSelector: containerSelector }, sessionId);
+    }
+  }, [flow.state, sessionId, containerSelector, send]);
+
+  // Forward scroll events to server during demo mode
+  useEffect(() => {
+    if (flow.state !== 'PAGINATION_DEMO') return;
+    const img = imgRef.current;
+    if (!img || !sessionId) return;
+
+    const handleDemoScroll = (e: WheelEvent) => {
+      // Don't prevent default or stop propagation - let the normal scroll handler work too
+      // Just forward the scroll to the demo handler
+      send('pagination:demoScroll', { deltaY: e.deltaY }, sessionId);
+    };
+
+    img.addEventListener('wheel', handleDemoScroll, { passive: true });
+
+    return () => {
+      img.removeEventListener('wheel', handleDemoScroll);
+    };
+  }, [flow.state, sessionId, send]);
+
+  // Forward click events to server during demo mode
+  useEffect(() => {
+    if (flow.state !== 'PAGINATION_DEMO') return;
+    const img = imgRef.current;
+    if (!img || !sessionId) return;
+
+    const handleDemoClick = (e: MouseEvent) => {
+      const rect = img.getBoundingClientRect();
+      const scaleX = img.naturalWidth / rect.width;
+      const scaleY = img.naturalHeight / rect.height;
+      const x = Math.round((e.clientX - rect.left) * scaleX);
+      const y = Math.round((e.clientY - rect.top) * scaleY);
+
+      send('pagination:demoClick', { x, y }, sessionId);
+    };
+
+    img.addEventListener('click', handleDemoClick);
+
+    return () => {
+      img.removeEventListener('click', handleDemoClick);
+    };
+  }, [flow.state, sessionId, send]);
+
   // Handle selected element - extract container content
   // Triggers on selection mode click OR auto-detect
   useEffect(() => {
@@ -442,9 +493,9 @@ export function BuilderPage() {
       lastExtractedSelectorRef.current = '';
       addLog(`Applied ${validLabels.length} labels from container`);
 
-      // Proceed to pagination detection with the container selector
-      // This will be used to count products during scroll detection
-      flow.proceedToFinalConfig(container);
+      // Proceed to pagination demo with the container selector
+      // This will be used to count products during demo mode
+      flow.proceedToPaginationDemo(container);
     },
     [addLog, flow]
   );
@@ -641,8 +692,8 @@ export function BuilderPage() {
       case 'product':
         flow.handleProductConfirm(confirmed);
         break;
-      case 'pagination':
-        flow.handlePaginationConfirm(confirmed);
+      case 'pagination_demo_success':
+        flow.handleDemoConfirm(confirmed);
         break;
     }
   }, [flow]);
@@ -676,7 +727,10 @@ export function BuilderPage() {
         detectedProduct={flow.detectedProduct}
         productConfidence={flow.productConfidence}
         productScreenshot={flow.productScreenshot}
-        detectedPagination={flow.detectedPagination}
+        demoProgress={flow.demoProgress}
+        demoResult={flow.demoResult}
+        onRetryDemo={flow.retryDemo}
+        onSkipPagination={flow.skipPagination}
       />
 
       <div style={{ padding: '0 20px', maxWidth: '100%' }}>
@@ -756,6 +810,7 @@ export function BuilderPage() {
                 containerSelector={containerSelector}
                 onSaveLabels={handleSaveLabels}
                 onCancel={handleCancelLabeling}
+                aiLabels={aiLabels}
               />
             )}
 

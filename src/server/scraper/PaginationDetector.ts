@@ -265,6 +265,33 @@ export class PaginationDetector {
               return;
             }
 
+            // SKIP common non-pagination elements - ratings, reviews, category links, etc.
+            // Skip if text looks like a rating (e.g., "5.02 reviews", "4.5 stars", "3.9/5")
+            if (/\\d+\\.\\d+\\s*(review|star|rating|out of)/i.test(text)) {
+              console.log('[findPostGridButtons] Skipping rating/review:', text);
+              return;
+            }
+            // Skip if text contains product-related category words
+            if (/\\b(cardigan|shirt|dress|pants|shoes|jacket|sweater|blouse|skirt|coat|jeans|boots|sneakers|top|bottom|wear|clothing|outfit)s?\\b/i.test(textLower)) {
+              console.log('[findPostGridButtons] Skipping product category:', text);
+              return;
+            }
+            // Skip if text is a help/support link
+            if (/\\b(order|help|support|contact|faq|return|shipping|track|where|my account|sign in|log in)\\b/i.test(textLower)) {
+              console.log('[findPostGridButtons] Skipping help/support link:', text);
+              return;
+            }
+            // Skip if it's a filter/sort option
+            if (/\\b(filter|sort|refine|brand|size|color|price|category)\\b/i.test(textLower)) {
+              console.log('[findPostGridButtons] Skipping filter/sort:', text);
+              return;
+            }
+            // Skip if it looks like a "More +" or "See more X" category expander (not pagination)
+            if (/^more\\s*\\+?$/i.test(text) || /^see\\s+more\\s+\\w/i.test(text)) {
+              console.log('[findPostGridButtons] Skipping category expander:', text);
+              return;
+            }
+
             // Calculate position score - prefer buttons near/after the product grid
             var positionScore = 0;
 
@@ -320,10 +347,21 @@ export class PaginationDetector {
               structureScore -= 0.4;
             }
 
+            // BONUS for pagination-related keywords in text
+            if (/\\b(load\\s*more|show\\s*more|view\\s*more|more\\s*products|more\\s*results|see\\s*all)\\b/i.test(text)) {
+              structureScore += 0.35;
+            }
+
+            // BONUS for pagination-related class names
+            if (/load-?more|show-?more|view-?more|pagination|paging/i.test(className)) {
+              structureScore += 0.25;
+            }
+
             // Total confidence
             var confidence = positionScore + structureScore;
 
-            if (confidence >= 0.3) {
+            // Higher threshold to reduce false positives - must have pagination signals
+            if (confidence >= 0.5) {
               buttons.push({
                 el: el,
                 text: text,

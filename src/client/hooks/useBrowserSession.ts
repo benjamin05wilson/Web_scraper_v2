@@ -82,6 +82,10 @@ interface UseBrowserSessionReturn {
   extractContainerContent: (selector: string) => void;
   extractedContent: ExtractedContentItem[];
 
+  // AI field labeling
+  aiLabels: Array<{ index: number; field: string; confidence: number; reason?: string }>;
+  clearAiLabels: () => void;
+
   // Auto-detect product
   autoDetectProduct: () => void;
   isAutoDetecting: boolean;
@@ -126,6 +130,9 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
 
   // Container extraction state
   const [extractedContent, setExtractedContent] = useState<ExtractedContentItem[]>([]);
+
+  // AI-generated labels for extracted content
+  const [aiLabels, setAiLabels] = useState<Array<{ index: number; field: string; confidence: number; reason?: string }>>([]);
 
   // Auto-detect state
   const [isAutoDetecting, setIsAutoDetecting] = useState(false);
@@ -268,6 +275,19 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
           console.log('[Session] Auto-detected product:', msg.payload.element?.css);
         } else {
           console.log('[Session] Auto-detect failed:', msg.payload.error);
+        }
+      })
+    );
+
+    // AI field labeling result
+    unsubscribes.push(
+      subscribe('fields:labeled', (msg) => {
+        if (msg.payload.success && msg.payload.labels) {
+          console.log('[Session] AI labeled fields:', msg.payload.labels.length, 'labels');
+          setAiLabels(msg.payload.labels);
+        } else {
+          console.log('[Session] AI labeling failed:', msg.payload.error);
+          setAiLabels([]);
         }
       })
     );
@@ -533,6 +553,9 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
 
     extractContainerContent,
     extractedContent,
+
+    aiLabels,
+    clearAiLabels: useCallback(() => setAiLabels([]), []),
 
     autoDetectProduct,
     isAutoDetecting,

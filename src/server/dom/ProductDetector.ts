@@ -15,6 +15,14 @@ import type {
   CandidateElement,
   ClassificationResult,
 } from '../types/detection-types.js';
+import type {
+  GridRegionResult,
+  SelectorValidationResult,
+  RegionHTMLResult,
+  MultiStepDetectionResult,
+  MultiStepDetectionConfig,
+} from '../ai/types.js';
+import { DEFAULT_MULTI_STEP_CONFIG } from '../ai/types.js';
 
 /**
  * Main orchestrator for ML-based product detection.
@@ -1530,6 +1538,540 @@ export class ProductDetector {
       console.error('[ProductDetector] AI detection error:', error);
       const mlResult = await this.detectProduct();
       return { ...mlResult, source: 'ml' };
+    }
+  }
+
+  // ===========================================================================
+  // MULTI-STEP AI DETECTION PIPELINE
+  // ===========================================================================
+
+  /**
+   * Multi-step AI detection pipeline for near-100% accuracy
+   * Pipeline: Grid Detection → HTML Extraction → Candidate Generation →
+   *           Live Validation → AI Refinement Loop → Final Verification
+   */
+  async detectProductWithMultiStepAI(
+    config: Partial<MultiStepDetectionConfig> = {}
+  ): Promise<MultiStepDetectionResult> {
+    const fullConfig = { ...DEFAULT_MULTI_STEP_CONFIG, ...config };
+    const gemini = getGeminiService();
+
+    console.log('[ProductDetector] Starting multi-step AI detection pipeline...');
+
+    // Track pipeline state for result
+    const pipelineState = {
+      gridDetected: false,
+      candidatesGenerated: 0,
+      refinementIterations: 0,
+      verified: false,
+    };
+
+    try {
+      // =====================================================================
+      // Step 1: Visual Grid Detection
+      // =====================================================================
+      let gridRegion: GridRegionResult | null = null;
+      let screenshotBase64: string;
+
+      if (!fullConfig.skipVisualStep) {
+        console.log('[ProductDetector] Step 1: Visual grid detection...');
+        const screenshotBuffer = await this.page.screenshot({ type: 'png' });
+        screenshotBase64 = screenshotBuffer.toString('base64');
+
+        const gridResult = await gemini.detectProductGridRegion(screenshotBase64);
+
+        if (gridResult.success && gridResult.data?.grid_found) {
+          gridRegion = gridResult.data;
+          pipelineState.gridDetected = true;
+          console.log(`[ProductDetector] Grid detected: ${gridRegion.estimated_columns}x${gridRegion.estimated_rows} at (${gridRegion.region.left_percent}%, ${gridRegion.region.top_percent}%)`);
+        } else {
+          console.log('[ProductDetector] No grid detected, will use full page');
+        }
+      } else {
+        // Still need screenshot for verification
+        const screenshotBuffer = await this.page.screenshot({ type: 'png' });
+        screenshotBase64 = screenshotBuffer.toString('base64');
+      }
+
+      // =====================================================================
+      // Step 2: HTML Extraction from Region
+      // =====================================================================
+      console.log('[ProductDetector] Step 2: Extracting HTML from region...');
+      const regionHTML = await this.extractRegionHTML(gridRegion);
+      console.log(`[ProductDetector] Extracted ${regionHTML.sampleElements.length} sample elements, ${regionHTML.containerCandidates.length} container candidates`);
+
+      if (regionHTML.sampleElements.length < 2) {
+        console.log('[ProductDetector] Not enough sample elements, falling back to single AI detection');
+        const fallback = await this.detectProductWithAI();
+        return {
+          selector: fallback.selectedElement?.selector || '',
+          genericSelector: fallback.selectedElement?.genericSelector || '',
+          confidence: fallback.confidence,
+          source: 'single-ai',
+          iterations: 1,
+          pipeline: pipelineState,
+        };
+      }
+
+      // =====================================================================
+      // Step 3: Generate Selector Candidates
+      // =====================================================================
+      console.log('[ProductDetector] Step 3: Generating selector candidates...');
+      const sampleHTMLs = regionHTML.sampleElements.map(e => e.outerHTML);
+
+      const candidatesResult = await gemini.generateSelectorCandidates(
+        sampleHTMLs,
+        regionHTML.fullHTML.substring(0, 5000),
+        regionHTML.containerCandidates
+      );
+
+      if (!candidatesResult.success || !candidatesResult.data?.candidates.length) {
+        console.log('[ProductDetector] Failed to generate candidates, falling back to ML');
+        const fallback = await this.detectProduct();
+        return {
+          selector: fallback.selectedElement?.selector || '',
+          genericSelector: fallback.selectedElement?.genericSelector || '',
+          confidence: fallback.confidence,
+          source: 'ml',
+          iterations: 1,
+          pipeline: pipelineState,
+        };
+      }
+
+      let candidates = candidatesResult.data.candidates;
+      pipelineState.candidatesGenerated = candidates.length;
+      console.log(`[ProductDetector] Generated ${candidates.length} candidates:`);
+      candidates.forEach((c, i) => console.log(`  ${i + 1}. ${c.selector} (${c.specificity}, priority: ${c.priority})`));
+
+      // Estimated product count from grid or sample
+      const estimatedProductCount = gridRegion
+        ? gridRegion.estimated_columns * gridRegion.estimated_rows
+        : regionHTML.sampleElements.length * 3;
+
+      // =====================================================================
+      // Steps 4-5: Validation + Refinement Loop
+      // =====================================================================
+      let acceptedSelector: string | null = null;
+      let iteration = 0;
+
+      while (iteration < fullConfig.maxRefinementIterations && !acceptedSelector) {
+        iteration++;
+        pipelineState.refinementIterations = iteration;
+        console.log(`[ProductDetector] Step 4-5: Validation/Refinement iteration ${iteration}...`);
+
+        // Step 4: Validate all current candidates
+        const validationResults = await this.validateSelectorCandidates(
+          candidates.map(c => c.selector)
+        );
+
+        console.log('[ProductDetector] Validation results:');
+        validationResults.forEach(v => {
+          console.log(`  ${v.selector}: ${v.matchCount} matches, ${v.hasPrices} prices, ${v.hasImages} images${v.issues.length ? ` [${v.issues.join(', ')}]` : ''}`);
+        });
+
+        // Step 5: AI refinement decision
+        const refinementResult = await gemini.refineSelectorWithValidation(
+          validationResults,
+          estimatedProductCount,
+          iteration
+        );
+
+        if (!refinementResult.success || !refinementResult.data) {
+          console.log('[ProductDetector] Refinement failed, using best ML candidate');
+          break;
+        }
+
+        const decision = refinementResult.data;
+        console.log(`[ProductDetector] AI decision: ${decision.action} - ${decision.reasoning}`);
+
+        if (decision.action === 'accept' && decision.selected_selector) {
+          acceptedSelector = decision.selected_selector;
+          console.log(`[ProductDetector] Selector accepted: ${acceptedSelector}`);
+        } else if (decision.action === 'refine' && decision.refined_selector) {
+          // Add refined selector as new candidate for next iteration
+          candidates = [{
+            selector: decision.refined_selector,
+            reasoning: decision.reasoning,
+            specificity: 'medium',
+            expected_count: estimatedProductCount,
+            priority: 1,
+          }];
+          console.log(`[ProductDetector] Selector refined to: ${decision.refined_selector}`);
+        } else if (decision.action === 'reject_all') {
+          console.log('[ProductDetector] All selectors rejected by AI');
+          break;
+        }
+      }
+
+      // If no selector accepted after iterations, use best ML candidate
+      if (!acceptedSelector) {
+        console.log('[ProductDetector] No AI-accepted selector, falling back to ML');
+        const fallback = await this.detectProduct();
+        return {
+          selector: fallback.selectedElement?.selector || '',
+          genericSelector: fallback.selectedElement?.genericSelector || '',
+          confidence: fallback.confidence,
+          source: 'ml',
+          iterations: iteration,
+          pipeline: pipelineState,
+        };
+      }
+
+      // =====================================================================
+      // Step 6: Final Verification
+      // =====================================================================
+      let finalConfidence = 0.8; // Default confidence for accepted selectors
+
+      if (fullConfig.enableVerification) {
+        console.log('[ProductDetector] Step 6: Final verification...');
+
+        // Get sample HTML of matched elements for verification
+        const verificationSamples = await this.page.evaluate((selector) => {
+          try {
+            const elements = document.querySelectorAll(selector);
+            return Array.from(elements)
+              .slice(0, 5)
+              .map(el => el.outerHTML.substring(0, 1000));
+          } catch {
+            return [];
+          }
+        }, acceptedSelector);
+
+        if (verificationSamples.length > 0) {
+          const verifyResult = await gemini.verifyProductElements(
+            acceptedSelector,
+            verificationSamples,
+            screenshotBase64!
+          );
+
+          if (verifyResult.success && verifyResult.data) {
+            pipelineState.verified = verifyResult.data.verified;
+            finalConfidence = verifyResult.data.confidence;
+
+            if (!verifyResult.data.verified) {
+              console.log(`[ProductDetector] Verification failed: ${verifyResult.data.issues.join(', ')}`);
+              // Still use the selector but with reduced confidence
+              finalConfidence = Math.min(finalConfidence, 0.5);
+            } else {
+              console.log(`[ProductDetector] Verification passed: ${verifyResult.data.product_count} products confirmed`);
+            }
+          }
+        }
+      }
+
+      // Generate generic selector (the accepted selector should already be generic)
+      const genericSelector = acceptedSelector;
+
+      console.log(`[ProductDetector] Multi-step detection complete: ${acceptedSelector} (confidence: ${(finalConfidence * 100).toFixed(0)}%)`);
+
+      return {
+        selector: acceptedSelector,
+        genericSelector,
+        confidence: finalConfidence,
+        source: 'multi-step-ai',
+        iterations: iteration,
+        pipeline: pipelineState,
+      };
+
+    } catch (error) {
+      console.error('[ProductDetector] Multi-step detection error:', error);
+      const fallback = await this.detectProduct();
+      return {
+        selector: fallback.selectedElement?.selector || '',
+        genericSelector: fallback.selectedElement?.genericSelector || '',
+        confidence: fallback.confidence,
+        source: 'ml',
+        iterations: 0,
+        pipeline: pipelineState,
+      };
+    }
+  }
+
+  /**
+   * Step 2: Extract HTML from the detected grid region
+   */
+  private async extractRegionHTML(gridRegion: GridRegionResult | null): Promise<RegionHTMLResult> {
+    const script = `
+      (function() {
+        const viewport = { width: window.innerWidth, height: window.innerHeight };
+
+        // Define region bounds (percentage to pixels)
+        const region = ${gridRegion ? JSON.stringify(gridRegion.region) : '{ top_percent: 10, left_percent: 0, width_percent: 100, height_percent: 80 }'};
+        const bounds = {
+          top: viewport.height * region.top_percent / 100,
+          left: viewport.width * region.left_percent / 100,
+          right: viewport.width * (region.left_percent + region.width_percent) / 100,
+          bottom: viewport.height * (region.top_percent + region.height_percent) / 100,
+        };
+
+        console.log('[ExtractRegion] Bounds:', bounds);
+
+        // Sample points within the region to find elements
+        const samplePoints = [];
+        const cols = 5;
+        const rows = 4;
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const x = bounds.left + (bounds.right - bounds.left) * (c + 0.5) / cols;
+            const y = bounds.top + (bounds.bottom - bounds.top) * (r + 0.5) / rows;
+            samplePoints.push({ x, y });
+          }
+        }
+
+        // Find elements at sample points
+        const foundElements = new Set();
+        const elementDetails = [];
+
+        for (const point of samplePoints) {
+          const element = document.elementFromPoint(point.x, point.y);
+          if (!element || element === document.body || element === document.documentElement) continue;
+
+          // Walk up to find a reasonable container (product card)
+          let current = element;
+          let depth = 0;
+          while (current && current !== document.body && depth < 8) {
+            const rect = current.getBoundingClientRect();
+
+            // Skip if too small or too large
+            if (rect.width < 80 || rect.height < 80) {
+              current = current.parentElement;
+              depth++;
+              continue;
+            }
+            if (rect.width > viewport.width * 0.6) {
+              break; // Too wide, likely a container
+            }
+
+            // Check if this looks like a product card (has image and some text)
+            const hasImg = current.querySelector('img') !== null;
+            const hasLink = current.tagName === 'A' || current.querySelector('a') !== null;
+            const textLength = (current.textContent || '').trim().length;
+
+            if (hasImg && (hasLink || textLength > 20) && !foundElements.has(current)) {
+              foundElements.add(current);
+              elementDetails.push({
+                element: current,
+                outerHTML: current.outerHTML.substring(0, 2000),
+                selector: '', // Will fill in below
+                boundingBox: {
+                  x: rect.x,
+                  y: rect.y,
+                  width: rect.width,
+                  height: rect.height,
+                },
+              });
+              break;
+            }
+
+            current = current.parentElement;
+            depth++;
+          }
+        }
+
+        console.log('[ExtractRegion] Found', elementDetails.length, 'candidate elements');
+
+        // Generate selectors for found elements
+        function getSelector(el) {
+          if (el.id && !el.id.match(/^[0-9]/)) {
+            return '#' + CSS.escape(el.id);
+          }
+
+          const tag = el.tagName.toLowerCase();
+          const classes = Array.from(el.classList)
+            .filter(c => !c.match(/^[0-9]|hover|active|focus|selected|ng-|js-/i))
+            .slice(0, 2);
+
+          if (classes.length > 0) {
+            return tag + '.' + classes.map(c => CSS.escape(c)).join('.');
+          }
+
+          return tag;
+        }
+
+        for (const detail of elementDetails) {
+          detail.selector = getSelector(detail.element);
+          delete detail.element; // Can't serialize DOM elements
+        }
+
+        // Find common container (parent of all found elements)
+        let containerHTML = '';
+        const containerCandidates = [];
+
+        if (elementDetails.length >= 2) {
+          // Get first element to trace up
+          const firstEl = document.querySelector(elementDetails[0].selector);
+          if (firstEl) {
+            let current = firstEl.parentElement;
+            let depth = 0;
+            while (current && current !== document.body && depth < 5) {
+              const childCount = current.children.length;
+              if (childCount >= elementDetails.length * 0.8) {
+                // This could be the container
+                containerHTML = current.outerHTML.substring(0, 8000);
+                containerCandidates.push(getSelector(current));
+              }
+              current = current.parentElement;
+              depth++;
+            }
+          }
+        }
+
+        // Build full HTML context (limited size)
+        let fullHTML = '';
+        if (containerHTML) {
+          fullHTML = containerHTML;
+        } else {
+          fullHTML = elementDetails.map(e => e.outerHTML).join('\\n\\n');
+        }
+
+        return {
+          fullHTML: fullHTML.substring(0, 10000),
+          sampleElements: elementDetails.slice(0, 5),
+          containerCandidates: containerCandidates.slice(0, 3),
+        };
+      })()
+    `;
+
+    try {
+      const result = await this.page.evaluate(script);
+      return result as RegionHTMLResult;
+    } catch (error) {
+      console.error('[ProductDetector] extractRegionHTML error:', error);
+      return {
+        fullHTML: '',
+        sampleElements: [],
+        containerCandidates: [],
+      };
+    }
+  }
+
+  /**
+   * Step 4: Validate selector candidates against live page
+   */
+  private async validateSelectorCandidates(selectors: string[]): Promise<SelectorValidationResult[]> {
+    const script = `
+      (function() {
+        const selectors = ${JSON.stringify(selectors)};
+        const results = [];
+
+        for (const selector of selectors) {
+          const result = {
+            selector,
+            valid: false,
+            matchCount: 0,
+            hasImages: 0,
+            hasPrices: 0,
+            hasLinks: 0,
+            sampleHTML: [],
+            avgSize: { width: 0, height: 0 },
+            inViewport: 0,
+            issues: [],
+          };
+
+          try {
+            const elements = document.querySelectorAll(selector);
+            result.matchCount = elements.length;
+            result.valid = true;
+
+            if (elements.length === 0) {
+              result.issues.push('No elements matched');
+              results.push(result);
+              continue;
+            }
+
+            let totalWidth = 0;
+            let totalHeight = 0;
+            const viewport = { width: window.innerWidth, height: window.innerHeight };
+            const pricePattern = /[£$€¥₹]\\s*\\d+|\\d+[.,]\\d{2}|\\d+\\s*(MAD|USD|EUR|GBP)/i;
+
+            for (let i = 0; i < elements.length; i++) {
+              const el = elements[i];
+              const rect = el.getBoundingClientRect();
+
+              totalWidth += rect.width;
+              totalHeight += rect.height;
+
+              // Check if in viewport
+              if (rect.top < viewport.height && rect.bottom > 0 &&
+                  rect.left < viewport.width && rect.right > 0) {
+                result.inViewport++;
+              }
+
+              // Check for images
+              if (el.querySelector('img') || el.tagName === 'IMG') {
+                result.hasImages++;
+              }
+
+              // Check for prices
+              const text = el.textContent || '';
+              if (pricePattern.test(text) || el.querySelector('[class*="price"]')) {
+                result.hasPrices++;
+              }
+
+              // Check for links
+              if (el.tagName === 'A' || el.querySelector('a[href]')) {
+                result.hasLinks++;
+              }
+
+              // Sample HTML (first 3 elements)
+              if (i < 3) {
+                result.sampleHTML.push(el.outerHTML.substring(0, 500));
+              }
+            }
+
+            result.avgSize = {
+              width: Math.round(totalWidth / elements.length),
+              height: Math.round(totalHeight / elements.length),
+            };
+
+            // Detect issues
+            if (elements.length < 3) {
+              result.issues.push('Too few elements (' + elements.length + ')');
+            }
+            if (elements.length > 200) {
+              result.issues.push('Too many elements (' + elements.length + ')');
+            }
+            if (result.hasImages < elements.length * 0.5) {
+              result.issues.push('Less than 50% have images');
+            }
+            if (result.hasPrices < elements.length * 0.3) {
+              result.issues.push('Less than 30% have prices');
+            }
+            if (result.avgSize.width < 80 || result.avgSize.height < 80) {
+              result.issues.push('Elements too small (avg ' + result.avgSize.width + 'x' + result.avgSize.height + ')');
+            }
+            if (result.avgSize.width > viewport.width * 0.8) {
+              result.issues.push('Elements too wide (probably containers)');
+            }
+
+          } catch (e) {
+            result.issues.push('Invalid selector syntax: ' + e.message);
+          }
+
+          results.push(result);
+        }
+
+        return results;
+      })()
+    `;
+
+    try {
+      const results = await this.page.evaluate(script);
+      return results as SelectorValidationResult[];
+    } catch (error) {
+      console.error('[ProductDetector] validateSelectorCandidates error:', error);
+      return selectors.map(s => ({
+        selector: s,
+        valid: false,
+        matchCount: 0,
+        hasImages: 0,
+        hasPrices: 0,
+        hasLinks: 0,
+        sampleHTML: [],
+        avgSize: { width: 0, height: 0 },
+        inViewport: 0,
+        issues: ['Validation failed'],
+      }));
     }
   }
 }

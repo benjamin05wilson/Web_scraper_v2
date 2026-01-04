@@ -38,8 +38,9 @@ export class StructuralAnalyzer {
 
         function extractClassPatterns(el) {
           // Extract meaningful class patterns, filtering out dynamic/state classes
+          // Note: We don't exclude underscores because CSS Modules use them (e.g., price_singlePrice__hTG4o)
           return Array.from(el.classList)
-            .filter(cls => !cls.match(/^(hover|active|focus|selected|ng-|js-|_|[0-9])/) && !cls.includes('@') && !cls.includes('/'))
+            .filter(cls => !cls.match(/^(hover|active|focus|selected|ng-|js-|is-|has-|[0-9])/) && !cls.includes('@') && !cls.includes('/'))
             .filter(cls => cls.length > 2 && cls.length < 50);
         }
 

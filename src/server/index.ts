@@ -20,6 +20,8 @@ import { ScrapingEngine } from './scraper/ScrapingEngine.js';
 import { WebRTCManager } from './streaming/WebRTCManager.js';
 import { scrapeNextUrlsFromList } from './scraper/NextScraper.js';
 import { PaginationDetector } from './scraper/PaginationDetector.js';
+import { PaginationVerifier } from './scraper/PaginationVerifier.js';
+import { PaginationDemoHandler } from './scraper/PaginationDemoHandler.js';
 import { ScrollTestHandler } from './scraper/ScrollTestHandler.js';
 import { PopupHandler } from './scraper/PopupHandler.js';
 import { NetworkInterceptor, type NetworkInterceptorConfig } from './scraper/handlers/NetworkInterceptor.js';
@@ -58,6 +60,7 @@ interface ActiveSession {
   lastUrlCheckTime: number;
   scrollTestHandler?: ScrollTestHandler;
   networkInterceptor?: NetworkInterceptor;
+  paginationDemoHandler?: PaginationDemoHandler;
 }
 
 const sessions = new Map<string, ActiveSession>();
@@ -542,10 +545,11 @@ async function handleMessage(
 
       // Use AI-enhanced detection if available
       const gemini = getGeminiService();
-      console.log(`[Server] Auto-detecting product (AI ${gemini.isEnabled ? 'enabled' : 'disabled'})...`);
+      console.log(`[Server] Auto-detecting product (AI ${gemini.isEnabled ? 'enabled - using multi-step pipeline' : 'disabled'})...`);
 
+      // Use the new multi-step AI pipeline for maximum accuracy when AI is enabled
       const detected = gemini.isEnabled
-        ? await session.inspector.autoDetectProductWithAI()
+        ? await session.inspector.autoDetectProductWithMultiStepAI()
         : await session.inspector.autoDetectProduct();
       (session as any)._autoDetecting = false;
 
@@ -555,6 +559,7 @@ async function handleMessage(
 
         // Capture screenshot of the detected element
         let screenshotBase64: string | null = null;
+        let screenshotBuffer: Buffer | null = null;
         const highlightSelector = detected.css;
         if (highlightSelector) {
           try {
@@ -565,7 +570,7 @@ async function handleMessage(
             // Take screenshot of the element
             const element = await session.browserSession.page.$(highlightSelector);
             if (element) {
-              const screenshotBuffer = await element.screenshot({ type: 'png' });
+              screenshotBuffer = await element.screenshot({ type: 'png' });
               screenshotBase64 = `data:image/png;base64,${screenshotBuffer.toString('base64')}`;
               console.log('[Server] Captured product element screenshot');
             }
@@ -579,6 +584,67 @@ async function handleMessage(
           element: detected,
           screenshot: screenshotBase64,
         }, session.id);
+
+        // =====================================================================
+        // AUTO-LABELING: Extract content and label with AI automatically
+        // =====================================================================
+        if (gemini.isEnabled && highlightSelector) {
+          try {
+            console.log('[Server] Auto-extracting content for AI labeling...');
+
+            // Extract content from the detected product card
+            const contentResult = await session.inspector.extractContainerContent(highlightSelector);
+
+            if (contentResult.items && contentResult.items.length > 0) {
+              console.log(`[Server] Extracted ${contentResult.items.length} items, sending to AI for labeling...`);
+
+              // Send extraction result to client
+              send(ws, 'container:content', contentResult, session.id);
+
+              // Prepare items for AI labeling
+              const extractedItems = contentResult.items.map((item, index) => ({
+                index,
+                type: item.type as 'text' | 'link' | 'image',
+                content: item.value,
+                selector: item.selector,
+              }));
+
+              // Get screenshot for labeling (reuse if we have it)
+              let labelScreenshotBase64 = screenshotBuffer ? screenshotBuffer.toString('base64') : '';
+              if (!labelScreenshotBase64) {
+                const fullScreenshot = await session.browserSession.page.screenshot({ type: 'png' });
+                labelScreenshotBase64 = fullScreenshot.toString('base64');
+              }
+
+              // Call AI for labeling
+              const labelResult = await gemini.labelFields(extractedItems, labelScreenshotBase64);
+
+              if (labelResult.success && labelResult.data) {
+                console.log(`[Server] AI auto-labeled ${labelResult.data.labels.length} fields (latency: ${labelResult.latencyMs}ms)`);
+
+                // Log price handling for debugging
+                const priceLabels = labelResult.data.labels.filter(l => l.field === 'price' || l.field === 'original_price');
+                if (priceLabels.length > 1) {
+                  console.log(`[Server] Multiple price fields detected: ${priceLabels.map(l => `${l.field}(idx:${l.index})`).join(', ')}`);
+                }
+
+                send(ws, 'fields:labeled', {
+                  success: true,
+                  labels: labelResult.data.labels,
+                  latencyMs: labelResult.latencyMs,
+                  autoLabeled: true, // Flag to indicate this was automatic
+                }, session.id);
+              } else {
+                console.log('[Server] AI auto-labeling failed:', labelResult.error);
+              }
+            } else {
+              console.log('[Server] No content extracted for auto-labeling');
+            }
+          } catch (labelError) {
+            console.error('[Server] Auto-labeling error:', labelError);
+            // Don't send error to client - auto-labeling is optional enhancement
+          }
+        }
       } else {
         send(ws, 'dom:autoDetect', { success: false, error: 'No product found' }, session.id);
       }
@@ -1122,6 +1188,215 @@ async function handleMessage(
 
       // Immediately acknowledge the start
       send(ws, 'pagination:autoStart', { started: true }, session.id);
+      break;
+    }
+
+    // New: AI-verified pagination testing for 100% accurate detection
+    case 'pagination:testAll': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { itemSelector } = (payload as { itemSelector: string });
+
+      if (!itemSelector) {
+        send(ws, 'pagination:allTested', {
+          success: false,
+          error: 'itemSelector is required for pagination verification',
+          testedMethods: [],
+        }, session.id);
+        break;
+      }
+
+      console.log(`[Server] Starting AI-verified pagination testing with itemSelector: ${itemSelector}`);
+
+      // Create verifier with item selector
+      const verifier = new PaginationVerifier(session.browserSession.page, itemSelector);
+
+      // Run verification with progress reporting
+      verifier.testAllMethods((current, total, methodName) => {
+        // Send progress update
+        send(ws, 'pagination:testProgress', {
+          current,
+          total,
+          methodName,
+        }, session.id);
+      })
+        .then(result => {
+          console.log(`[Server] Pagination testing complete: ${result.testedMethods.length} methods tested`);
+          console.log(`[Server] Best method: ${result.bestMethod?.method || 'none'} (confidence: ${result.bestMethod?.confidence.toFixed(2) || 'N/A'})`);
+
+          send(ws, 'pagination:allTested', {
+            success: true,
+            testedMethods: result.testedMethods,
+            bestMethod: result.bestMethod,
+            totalTestDurationMs: result.totalTestDurationMs,
+          }, session.id);
+        })
+        .catch(error => {
+          console.error('[Server] Pagination testing failed:', error);
+          send(ws, 'pagination:allTested', {
+            success: false,
+            error: String(error),
+            testedMethods: [],
+          }, session.id);
+        });
+
+      break;
+    }
+
+    // User selected a pagination method from the tested results
+    case 'pagination:selectMethod': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { method } = payload as { method: any };
+      console.log(`[Server] User selected pagination method: ${method?.method}`);
+
+      // Just acknowledge - the client will store this in config
+      send(ws, 'pagination:result', {
+        success: true,
+        method: method?.method || 'none',
+        pagination: method ? {
+          type: method.method === 'infinite_scroll' ? 'infinite_scroll' : 'next_page',
+          selector: method.selector,
+        } : null,
+      }, session.id);
+      break;
+    }
+
+    // =========================================================================
+    // USER-GUIDED PAGINATION DEMO
+    // =========================================================================
+
+    // Start user demonstration mode for pagination
+    case 'pagination:startDemo': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { itemSelector } = payload as { itemSelector: string };
+
+      if (!itemSelector) {
+        send(ws, 'pagination:demoError', { error: 'itemSelector is required' }, session.id);
+        break;
+      }
+
+      console.log(`[Server] Starting pagination demo with itemSelector: ${itemSelector}`);
+
+      try {
+        const handler = new PaginationDemoHandler(session.browserSession.page);
+
+        // Set up event callback for auto-complete and wrong navigation
+        handler.setEventCallback((event) => {
+          switch (event.type) {
+            case 'autoComplete':
+              // Auto-complete triggered - send result to client
+              console.log('[Server] Pagination demo auto-completed');
+              session.paginationDemoHandler = undefined;
+              send(ws, 'pagination:demoResult', event.data, session.id);
+              break;
+            case 'wrongNavigation':
+              // User clicked on wrong element, navigated back
+              console.log('[Server] Pagination demo - wrong navigation detected');
+              send(ws, 'pagination:demoWrongNav', event.data, session.id);
+              break;
+            case 'error':
+              console.error('[Server] Pagination demo error:', event.data);
+              send(ws, 'pagination:demoError', event.data, session.id);
+              break;
+          }
+        });
+
+        session.paginationDemoHandler = handler;
+
+        const result = await handler.startDemo(itemSelector);
+        send(ws, 'pagination:demoStarted', {
+          productCount: result.productCount,
+          url: result.url,
+        }, session.id);
+      } catch (error) {
+        console.error('[Server] Pagination demo start failed:', error);
+        send(ws, 'pagination:demoError', { error: String(error) }, session.id);
+      }
+      break;
+    }
+
+    // Handle scroll during demo
+    case 'pagination:demoScroll': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session || !session.paginationDemoHandler) return;
+
+      const { deltaY } = payload as { deltaY: number };
+
+      try {
+        const result = await session.paginationDemoHandler.handleScroll(deltaY);
+        send(ws, 'pagination:demoProgress', {
+          type: 'scroll',
+          currentCount: result.currentCount,
+          delta: result.delta,
+          shouldAutoComplete: result.shouldAutoComplete,
+          accumulatedScroll: result.accumulatedScroll,
+        }, session.id);
+      } catch (error: any) {
+        console.error('[Server] Pagination demo scroll failed:', error);
+        send(ws, 'pagination:demoError', { error: error.message }, session.id);
+      }
+      break;
+    }
+
+    // Handle click during demo
+    case 'pagination:demoClick': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session || !session.paginationDemoHandler) return;
+
+      const { x, y } = payload as { x: number; y: number };
+
+      try {
+        const result = await session.paginationDemoHandler.handleClick(x, y);
+        send(ws, 'pagination:demoProgress', {
+          type: 'click',
+          selector: result.selector,
+          currentCount: result.currentCount,
+          delta: result.delta,
+          urlChanged: result.urlChanged,
+          wrongNavigation: result.wrongNavigation,
+          shouldAutoComplete: result.shouldAutoComplete,
+        }, session.id);
+      } catch (error: any) {
+        console.error('[Server] Pagination demo click failed:', error);
+        send(ws, 'pagination:demoError', { error: error.message }, session.id);
+      }
+      break;
+    }
+
+    // Manual complete demonstration (user clicks Done)
+    case 'pagination:demoComplete': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session || !session.paginationDemoHandler) {
+        send(ws, 'pagination:demoError', { error: 'No demo in progress' }, session?.id);
+        return;
+      }
+
+      try {
+        const result = await session.paginationDemoHandler.completeDemo();
+        session.paginationDemoHandler = undefined;
+        send(ws, 'pagination:demoResult', result, session.id);
+      } catch (error: any) {
+        console.error('[Server] Pagination demo complete failed:', error);
+        send(ws, 'pagination:demoError', { error: error.message }, session.id);
+      }
+      break;
+    }
+
+    // Cancel demonstration
+    case 'pagination:demoCancel': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      if (session.paginationDemoHandler) {
+        session.paginationDemoHandler.cancelDemo();
+        session.paginationDemoHandler = undefined;
+        console.log('[Server] Pagination demo cancelled');
+      }
       break;
     }
 

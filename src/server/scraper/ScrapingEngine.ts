@@ -552,6 +552,12 @@ export class ScrapingEngine {
                   if (idx === 0) {
                     console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Using :parent-link (closest a[href]), Found: ' + (el ? 'YES' : 'NO'));
                   }
+                } else if (cssSelector === ':self') {
+                  // :self means the container itself is the target element (e.g., container IS the link)
+                  el = container;
+                  if (idx === 0) {
+                    console.log('[ScrapingEngine] Container #' + idx + ' - Role: ' + role + ', Using :self (container itself), tagName: ' + container.tagName);
+                  }
                 } else {
                   el = container.querySelector(cssSelector);
                   if (idx === 0) {
@@ -873,9 +879,9 @@ export class ScrapingEngine {
             // Get ALL elements matching each selector
             const allElementsPerSelector = selectors.map(sel => {
               const selector = sel.selector.css;
-              // Skip :parent-link as it needs container context
-              if (selector === ':parent-link') {
-                console.log('[ScrapingEngine] Selector ":parent-link" skipped (needs container context)');
+              // Skip pseudo-selectors that need container context
+              if (selector === ':parent-link' || selector === ':self') {
+                console.log('[ScrapingEngine] Selector "' + selector + '" skipped (needs container context)');
                 return { selector: sel, elements: [] };
               }
               const elements = document.querySelectorAll(selector);
@@ -1003,9 +1009,9 @@ export class ScrapingEngine {
             // Fallback: Get first element from each selector
             const firstElements = selectors
               .map(sel => {
-                // Skip :parent-link as it needs container context
-                if (sel.selector.css === ':parent-link') {
-                  console.log('[ScrapingEngine] Selector ":parent-link" skipped (needs container context)');
+                // Skip pseudo-selectors that need container context
+                if (sel.selector.css === ':parent-link' || sel.selector.css === ':self') {
+                  console.log('[ScrapingEngine] Selector "' + sel.selector.css + '" skipped (needs container context)');
                   return null;
                 }
                 const el = document.querySelector(sel.selector.css);
@@ -1064,6 +1070,10 @@ export class ScrapingEngine {
                       // Handle :parent-link by checking closest parent link
                       if (sel.selector.css === ':parent-link') {
                         return c.closest('a[href]') !== null;
+                      }
+                      // Handle :self - the container itself is the target
+                      if (sel.selector.css === ':self') {
+                        return true; // Container always contains itself
                       }
                       return c.querySelector(sel.selector.css);
                     });
@@ -1129,6 +1139,11 @@ export class ScrapingEngine {
             // Special handling for :parent-link - look UP the DOM
             if (css === ':parent-link') {
               return container.closest('a[href]');
+            }
+
+            // Special handling for :self - the container itself is the target
+            if (css === ':self') {
+              return container;
             }
 
             // Strategy 1: Use the selector directly
@@ -1352,31 +1367,59 @@ export class ScrapingEngine {
       return false;
     }
 
-    // Check if next page button exists and is clickable
-    const exists = await this.page.evaluate((sel) => {
-      const el = document.querySelector(sel);
-      if (!el) return false;
+    // First, dismiss any blocking overlays (OneTrust, etc.) that might intercept clicks
+    await this.dismissBlockingOverlays();
 
-      // Check if disabled
-      if (el.hasAttribute('disabled')) return false;
-      if (el.classList.contains('disabled')) return false;
-      if (el.getAttribute('aria-disabled') === 'true') return false;
+    // Find the ENABLED clickable element among potentially multiple matches
+    // (e.g., back/forward chevrons where back may be disabled on page 1)
+    const clickableIndex = await this.page.evaluate((sel) => {
+      const elements = document.querySelectorAll(sel);
+      if (elements.length === 0) return -1;
 
-      // Check if visible
-      const style = getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      // Find the last enabled element (typically the "next" or "forward" button)
+      // Check from the end since "next" buttons are usually after "previous"
+      for (let i = elements.length - 1; i >= 0; i--) {
+        const el = elements[i] as HTMLElement;
 
-      return true;
+        // Check if disabled
+        if (el.hasAttribute('disabled')) continue;
+        if (el.classList.contains('disabled')) continue;
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+
+        // Check parent button if this is a child element (like a span inside a button)
+        const parentButton = el.closest('button, a, [role="button"]') as HTMLElement | null;
+        if (parentButton) {
+          if (parentButton.hasAttribute('disabled')) continue;
+          if (parentButton.classList.contains('disabled')) continue;
+          if (parentButton.getAttribute('aria-disabled') === 'true') continue;
+        }
+
+        // Check if visible
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (style.pointerEvents === 'none') continue;
+
+        // Found an enabled, visible element
+        return i;
+      }
+
+      return -1; // No enabled element found
     }, selector);
 
-    if (!exists) {
+    if (clickableIndex === -1) {
+      console.log('[ScrapingEngine] No enabled pagination element found');
       return false;
     }
+
+    console.log(`[ScrapingEngine] Clicking pagination element at index ${clickableIndex}`);
+
+    // Click the specific element using nth() locator
+    const locator = this.page.locator(selector).nth(clickableIndex);
 
     // Click and wait for navigation
     await Promise.all([
       this.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {}),
-      this.page.click(selector),
+      locator.click(),
     ]);
 
     // Brief wait for any JS to execute
@@ -1565,7 +1608,8 @@ export class ScrapingEngine {
       return await this.page.evaluate((sels) => {
         let total = 0;
         sels.forEach((sel: { selector: { css: string } }) => {
-          if (sel.selector.css === ':parent-link') return;
+          // Skip pseudo-selectors that are not valid CSS
+          if (sel.selector.css === ':parent-link' || sel.selector.css === ':self') return;
           total += document.querySelectorAll(sel.selector.css).length;
         });
         return total;
@@ -1638,8 +1682,10 @@ export class ScrapingEngine {
       return await this.page.evaluate((sels) => {
         let total = 0;
         sels.forEach((sel: { selector: { css: string } }) => {
-          // Skip :parent-link as it's not a valid CSS selector
-          if (sel.selector.css === ':parent-link') return;
+          // Skip pseudo-selectors that are not valid CSS
+          // :parent-link = container is inside a link
+          // :self = container itself is the target element
+          if (sel.selector.css === ':parent-link' || sel.selector.css === ':self') return;
           total += document.querySelectorAll(sel.selector.css).length;
         });
         return total;
@@ -2004,6 +2050,59 @@ export class ScrapingEngine {
     }
   }
 
+  /**
+   * Dismiss common blocking overlays (cookie banners, etc.) that intercept clicks
+   * Called before pagination clicks to ensure they're not blocked
+   */
+  private async dismissBlockingOverlays(): Promise<void> {
+    try {
+      // Common overlay selectors that block interactions
+      const overlaysRemoved = await this.page.evaluate(() => {
+        let removed = 0;
+
+        // OneTrust cookie banner overlays (very common)
+        const oneTrustSelectors = [
+          '#onetrust-consent-sdk',
+          '.onetrust-pc-dark-filter',
+          '#onetrust-banner-sdk',
+          '.ot-fade-in',
+        ];
+
+        // Other common cookie/consent overlays
+        const otherOverlaySelectors = [
+          '[class*="cookie-banner"]',
+          '[class*="consent-banner"]',
+          '[id*="cookie-banner"]',
+          '[id*="consent-banner"]',
+          '.cookie-overlay',
+          '.gdpr-overlay',
+        ];
+
+        const allSelectors = [...oneTrustSelectors, ...otherOverlaySelectors];
+
+        for (const selector of allSelectors) {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            // Remove the element entirely
+            el.remove();
+            removed++;
+          });
+        }
+
+        return removed;
+      });
+
+      if (overlaysRemoved > 0) {
+        console.log(`[ScrapingEngine] Removed ${overlaysRemoved} blocking overlay element(s)`);
+        // Brief wait for DOM to settle
+        await this.page.waitForTimeout(200);
+      }
+    } catch (error) {
+      // Non-fatal - continue with click attempt
+      console.log('[ScrapingEngine] Failed to dismiss overlays (non-fatal):', error);
+    }
+  }
+
   // =========================================================================
   // VALIDATION
   // =========================================================================
@@ -2029,8 +2128,10 @@ export class ScrapingEngine {
 
     // Validate each selector
     for (const selector of config.selectors) {
-      // Skip :parent-link validation - it will be checked via closest() at extraction time
-      if (selector.selector.css === ':parent-link') {
+      // Skip pseudo-selectors that are validated at extraction time
+      // :parent-link = container is inside a link (checked via closest())
+      // :self = container itself is the target element
+      if (selector.selector.css === ':parent-link' || selector.selector.css === ':self') {
         continue;
       }
 
