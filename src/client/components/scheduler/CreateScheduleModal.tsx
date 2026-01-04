@@ -34,7 +34,7 @@ export function CreateScheduleModal({ isOpen, onClose, onSave }: CreateScheduleM
 
       // Fetch available configs
       setLoadingConfigs(true);
-      fetch('http://localhost:3002/configs')
+      fetch('/api/configs')
         .then(res => res.json())
         .then(data => setConfigs(data.configs || []))
         .catch(() => setConfigs([]))

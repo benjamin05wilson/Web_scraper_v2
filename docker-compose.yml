@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Web Scraper Application
+  # ============================================================================
+  scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: web-scraper
+    restart: unless-stopped
+
+    # Environment variables
+    environment:
+      - NODE_ENV=production
+      - PORT=3002
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+
+    # Volumes for persistent data
+    volumes:
+      - ./configs:/app/configs
+      - ./chrome-data:/app/chrome-data
+
+    # Security options for Chromium
+    security_opt:
+      - seccomp:unconfined
+
+    # Shared memory for Chromium (prevents crashes)
+    shm_size: 4gb
+
+    # Resource limits - optimized for 8 cores / 32GB RAM
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+          cpus: '6'
+        reservations:
+          memory: 4G
+          cpus: '2'
+
+    # Network
+    networks:
+      - scraper-network
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================================
+  # Cloudflare Tunnel (cloudflared)
+  # ============================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare-tunnel
+    restart: unless-stopped
+
+    # Command to run tunnel with token
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+
+    # Depends on scraper being healthy
+    depends_on:
+      scraper:
+        condition: service_healthy
+
+    # Network
+    networks:
+      - scraper-network
+
+networks:
+  scraper-network:
+    driver: bridge

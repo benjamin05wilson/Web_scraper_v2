@@ -52,8 +52,8 @@ interface PriceFormat {
   remove_decimals: boolean;
 }
 
-// Get the WebSocket URL - use proxy path
-const WS_URL = `ws://${window.location.host}/ws`;
+// Get the WebSocket URL - use wss:// for HTTPS, ws:// for HTTP
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 export function BuilderPage() {
   // WebSocket connection
@@ -968,12 +968,69 @@ export function BuilderPage() {
                     height: '100%',
                     color: 'var(--text-secondary)',
                   }}>
-                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '20px', opacity: 0.5 }}>
-                      <rect x="3" y="3" width="18" height="18" rx="2" />
-                      <path d="M3 9h18M9 21V9" />
-                    </svg>
-                    <h3 style={{ margin: '0 0 10px 0', color: 'var(--text-primary)', fontSize: '1.2em' }}>No Browser Open</h3>
-                    <p style={{ margin: '0 0 8px 0', opacity: 0.7 }}>Enter a URL and click "Open Browser" to start</p>
+                    {sessionStatus === 'connecting' ? (
+                      <div style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        gap: '20px',
+                        padding: '40px',
+                        background: 'rgba(0,0,0,0.3)',
+                        borderRadius: '12px',
+                        backdropFilter: 'blur(10px)',
+                      }}>
+                        <div style={{
+                          width: '80px',
+                          height: '80px',
+                          borderRadius: '50%',
+                          background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          animation: 'pulse 2s ease-in-out infinite',
+                        }}>
+                          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+                            <circle cx="12" cy="12" r="10" />
+                            <line x1="2" y1="12" x2="22" y2="12" />
+                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                          </svg>
+                        </div>
+                        <div style={{ textAlign: 'center' }}>
+                          <h3 style={{ margin: '0 0 8px 0', color: 'var(--text-primary)', fontSize: '1.3em' }}>
+                            Starting Browser
+                          </h3>
+                          <p style={{ margin: '0 0 16px 0', opacity: 0.8, fontSize: '0.95em' }}>
+                            Launching Chromium in Docker...
+                          </p>
+                        </div>
+                        <div style={{
+                          width: '200px',
+                          height: '4px',
+                          background: 'rgba(255,255,255,0.1)',
+                          borderRadius: '2px',
+                          overflow: 'hidden',
+                        }}>
+                          <div style={{
+                            height: '100%',
+                            background: 'var(--accent-primary)',
+                            borderRadius: '2px',
+                            animation: 'loading-bar 2s ease-in-out infinite',
+                          }} />
+                        </div>
+                        <p style={{ margin: 0, opacity: 0.6, fontSize: '0.8em' }}>
+                          This may take 5-10 seconds on first load
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '20px', opacity: 0.5 }}>
+                          <rect x="3" y="3" width="18" height="18" rx="2" />
+                          <path d="M3 9h18M9 21V9" />
+                        </svg>
+                        <h3 style={{ margin: '0 0 10px 0', color: 'var(--text-primary)', fontSize: '1.2em' }}>No Browser Open</h3>
+                        <p style={{ margin: '0 0 8px 0', opacity: 0.7 }}>Enter a URL and click "Open Browser" to start</p>
+                      </>
+                    )}
                   </div>
                 )}
               </div>

@@ -71,6 +71,38 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ============================================================================
+// STATIC FILE SERVING (Production Only)
+// ============================================================================
+
+// Serve static files from built client directory in production
+if (process.env.NODE_ENV === 'production') {
+  const clientPath = path.join(process.cwd(), 'dist', 'client');
+
+  // Serve static assets (JS, CSS, images) with caching
+  app.use(express.static(clientPath, {
+    maxAge: '1y', // Cache static assets for 1 year
+    etag: true,
+    lastModified: true,
+  }));
+
+  // SPA fallback: All non-API/non-WS routes serve index.html
+  // This ensures React Router works on direct navigation/refresh
+  app.get('*', (req, res, next) => {
+    // Skip API routes, WebSocket, and health check
+    if (req.path.startsWith('/api') || req.path.startsWith('/ws') || req.path.startsWith('/health')) {
+      return next();
+    }
+
+    // Serve index.html for all other routes
+    res.sendFile(path.join(clientPath, 'index.html'));
+  });
+
+  console.log('[Server] Production mode: Serving static files from', clientPath);
+} else {
+  console.log('[Server] Development mode: Frontend served by Vite dev server');
+}
+
 // Health check
 app.get('/health', (_, res) => {
   res.json({ status: 'ok', sessions: sessions.size });
@@ -896,10 +928,8 @@ async function handleMessage(
       }
       console.log(`[Server] webrtc:offer - found session, starting screencast`);
 
-      // Start CDP screencast as fallback
-      await session.webrtc.startScreencast();
-
-      // Set up frame forwarding
+      // Set up frame forwarding FIRST (before starting screencast)
+      // This ensures the callback is set even if screencast was already running
       session.webrtc.setFrameCallback((frame, _timestamp) => {
         // Send frame via binary WebSocket message
         if (ws.readyState === WebSocket.OPEN) {
@@ -907,7 +937,13 @@ async function handleMessage(
         }
       });
 
-      console.log(`[Server] webrtc:offer - screencast started for session: ${session.id}`);
+      // Start CDP screencast (will do nothing if already running)
+      if (!session.webrtc.isActive()) {
+        await session.webrtc.startScreencast();
+        console.log(`[Server] webrtc:offer - screencast started for session: ${session.id}`);
+      } else {
+        console.log(`[Server] webrtc:offer - screencast already running, updated callback for session: ${session.id}`);
+      }
       send(ws, 'webrtc:answer', { mode: 'screencast', started: true }, session.id);
       break;
     }

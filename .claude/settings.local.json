@@ -12,7 +12,10 @@
       "Bash(dir:*)",
       "Bash(npm run build:*)",
       "Bash(npx vite build)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "Bash(docker compose build:*)",
+      "Bash(docker compose up:*)",
+      "Bash(docker compose logs:*)"
     ]
   }
 }

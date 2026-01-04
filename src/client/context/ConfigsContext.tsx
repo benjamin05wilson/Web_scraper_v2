@@ -16,7 +16,8 @@ interface ConfigsContextValue {
 
 const ConfigsContext = createContext<ConfigsContextValue | null>(null);
 
-const API_BASE = 'http://localhost:3002';
+// Use relative URLs - works in both dev (via proxy) and production
+const API_BASE = '';
 const CACHE_TTL = 5000; // 5 seconds
 
 interface ConfigsProviderProps {

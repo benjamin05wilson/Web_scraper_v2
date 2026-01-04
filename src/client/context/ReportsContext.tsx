@@ -33,7 +33,8 @@ interface ReportsContextValue {
 
 const ReportsContext = createContext<ReportsContextValue | null>(null);
 
-const API_BASE = 'http://localhost:3002';
+// Use relative URLs - works in both dev (via proxy) and production
+const API_BASE = '';
 const DEFAULT_PAGE_SIZE = 50;
 
 interface ReportsProviderProps {

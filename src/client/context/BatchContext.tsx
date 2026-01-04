@@ -54,7 +54,8 @@ interface BatchContextValue {
 
 const BatchContext = createContext<BatchContextValue | null>(null);
 
-const API_BASE = 'http://localhost:3002';
+// Use relative URLs - works in both dev (via proxy) and production
+const API_BASE = '';
 
 interface BatchProviderProps {
   children: ReactNode;
@@ -320,7 +321,8 @@ export function BatchProvider({ children }: BatchProviderProps) {
   }, [jobs]);
 
   const initSlotConnection = (slotId: number) => {
-    const ws = new WebSocket(`ws://localhost:3002/ws`);
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
       console.log(`Slot ${slotId} connected, creating session...`);

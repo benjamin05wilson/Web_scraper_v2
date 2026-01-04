@@ -18,7 +18,8 @@ interface SchedulerContextValue {
 
 const SchedulerContext = createContext<SchedulerContextValue | null>(null);
 
-const API_BASE = 'http://localhost:3002';
+// Use relative URLs - works in both dev (via proxy) and production
+const API_BASE = '';
 
 interface SchedulerProviderProps {
   children: ReactNode;

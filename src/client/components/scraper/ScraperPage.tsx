@@ -14,8 +14,8 @@ interface ScrapedProduct {
   [key: string]: any;
 }
 
-// Get the WebSocket URL - use proxy path (same as BuilderPage)
-const WS_URL = `ws://${window.location.host}/ws`;
+// Get the WebSocket URL - use wss:// for HTTPS, ws:// for HTTP
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 export function ScraperPage() {
   // Simple console logging
@@ -204,7 +204,7 @@ export function ScraperPage() {
   // Save products to BigQuery
   const saveProductsToBigQuery = async (products: ScrapedProduct[]) => {
     try {
-      const response = await fetch('http://localhost:3002/api/products/save', {
+      const response = await fetch('/api/products/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -490,10 +490,63 @@ export function ScraperPage() {
                     color: 'var(--text-secondary)',
                   }}>
                     {sessionStatus === 'connecting' ? (
-                      <>
-                        <span className="spinner" style={{ width: '50px', height: '50px', marginBottom: '20px' }} />
-                        <p>Loading browser...</p>
-                      </>
+                      <div style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        gap: '20px',
+                        padding: '40px',
+                        background: 'rgba(0,0,0,0.3)',
+                        borderRadius: '12px',
+                        backdropFilter: 'blur(10px)',
+                      }}>
+                        {/* Animated browser icon */}
+                        <div style={{
+                          width: '80px',
+                          height: '80px',
+                          borderRadius: '50%',
+                          background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          animation: 'pulse 2s ease-in-out infinite',
+                        }}>
+                          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+                            <circle cx="12" cy="12" r="10" />
+                            <line x1="2" y1="12" x2="22" y2="12" />
+                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                          </svg>
+                        </div>
+
+                        <div style={{ textAlign: 'center' }}>
+                          <h3 style={{ margin: '0 0 8px 0', color: 'var(--text-primary)', fontSize: '1.3em' }}>
+                            Starting Browser
+                          </h3>
+                          <p style={{ margin: '0 0 16px 0', opacity: 0.8, fontSize: '0.95em' }}>
+                            Launching Chromium in Docker...
+                          </p>
+                        </div>
+
+                        {/* Progress bar */}
+                        <div style={{
+                          width: '200px',
+                          height: '4px',
+                          background: 'rgba(255,255,255,0.1)',
+                          borderRadius: '2px',
+                          overflow: 'hidden',
+                        }}>
+                          <div style={{
+                            height: '100%',
+                            background: 'var(--accent-primary)',
+                            borderRadius: '2px',
+                            animation: 'loading-bar 2s ease-in-out infinite',
+                          }} />
+                        </div>
+
+                        <p style={{ margin: 0, opacity: 0.6, fontSize: '0.8em' }}>
+                          This may take 5-10 seconds on first load
+                        </p>
+                      </div>
                     ) : (
                       <>
                         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: '20px', opacity: 0.5 }}>

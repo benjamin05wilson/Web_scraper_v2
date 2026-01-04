@@ -30,33 +30,66 @@ export class BrowserManager extends EventEmitter {
   async createSession(sessionId: string, config: SessionConfig): Promise<BrowserSession> {
     console.log(`[BrowserManager] Creating session ${sessionId}`);
 
-    // Try to launch with installed Chrome first, fall back to bundled Chromium
+    // Check if running in Docker/production
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    // Use Docker-compatible flags in production
+    const chromeFlags = isProduction ? [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-blink-features=AutomationControlled',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--mute-audio',
+    ] : CHROME_FLAGS_WINDOWS;
+
+    console.log(`[BrowserManager] Running in ${isProduction ? 'production (Docker)' : 'development'} mode`);
+
     let browser: Browser;
-    try {
-      console.log('[BrowserManager] Attempting to use installed Chrome...');
+
+    if (isProduction) {
+      // In production/Docker, use bundled Chromium directly (skip Chrome check)
+      console.log('[BrowserManager] Launching bundled Chromium...');
       browser = await chromium.launch({
-        headless: false,
-        channel: 'chrome', // Use installed Chrome for best GPU support
-        args: CHROME_FLAGS_WINDOWS,
+        headless: false, // Headful for streaming (Xvfb provides display)
+        args: chromeFlags,
         ignoreDefaultArgs: IGNORED_DEFAULT_ARGS,
-        env: {
-          ...process.env,
-          ...CHROME_ENV_WINDOWS,
-        },
       });
-      console.log('[BrowserManager] Using installed Chrome');
-    } catch (chromeError) {
-      console.log('[BrowserManager] Chrome not found, using bundled Chromium:', chromeError);
-      browser = await chromium.launch({
-        headless: false,
-        args: CHROME_FLAGS_WINDOWS,
-        ignoreDefaultArgs: IGNORED_DEFAULT_ARGS,
-        env: {
-          ...process.env,
-          ...CHROME_ENV_WINDOWS,
-        },
-      });
-      console.log('[BrowserManager] Using bundled Chromium');
+      console.log('[BrowserManager] Chromium launched');
+    } else {
+      // In development, try Chrome first, fall back to Chromium
+      try {
+        console.log('[BrowserManager] Attempting to use installed Chrome...');
+        browser = await chromium.launch({
+          headless: false,
+          channel: 'chrome',
+          args: chromeFlags,
+          ignoreDefaultArgs: IGNORED_DEFAULT_ARGS,
+          env: {
+            ...process.env,
+            ...CHROME_ENV_WINDOWS,
+          },
+        });
+        console.log('[BrowserManager] Using installed Chrome');
+      } catch (chromeError) {
+        console.log('[BrowserManager] Chrome not found, using bundled Chromium');
+        browser = await chromium.launch({
+          headless: false,
+          args: chromeFlags,
+          ignoreDefaultArgs: IGNORED_DEFAULT_ARGS,
+          env: {
+            ...process.env,
+            ...CHROME_ENV_WINDOWS,
+          },
+        });
+        console.log('[BrowserManager] Using bundled Chromium');
+      }
     }
 
     // Create context with viewport

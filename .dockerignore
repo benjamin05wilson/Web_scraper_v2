@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# Environment files (will be mounted or passed separately)
+.env
+.env.local
+.env.*.local
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test coverage
+coverage/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Runtime data (will be volumes)
+chrome-data/
+configs/
+scrape-results*.json
+*.csv
+
+# Development files
+test-*.ts
+test-*.js
+vitest.config.ts
+
+# Documentation (optional, uncomment if you want to exclude)
+# *.md
+# docs/
+
+# Claude plans
+.claude/
