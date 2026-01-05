@@ -40,7 +40,22 @@ export function JobQueue({
   onDownloadResults,
 }: JobQueueProps) {
   const completedPercent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+  const skippedPercent = progress.total > 0 ? Math.round((progress.skipped / progress.total) * 100) : 0;
+  const errorsPercent = progress.total > 0 ? Math.round((progress.errors / progress.total) * 100) : 0;
+  const totalDonePercent = completedPercent + skippedPercent + errorsPercent;
   const hasResults = progress.completed > 0;
+
+  // Sort jobs: running first, then pending, then completed, then errors, then skipped at bottom
+  const sortedJobs = [...jobs].sort((a, b) => {
+    const statusOrder: Record<string, number> = {
+      running: 0,
+      pending: 1,
+      completed: 2,
+      error: 3,
+      skipped: 4,
+    };
+    return (statusOrder[a.status] ?? 5) - (statusOrder[b.status] ?? 5);
+  });
 
   return (
     <div className="card">
@@ -115,7 +130,7 @@ export function JobQueue({
           >
             Overall Progress
           </span>
-          <span style={{ fontSize: '0.9em', fontWeight: 600 }}>{completedPercent}%</span>
+          <span style={{ fontSize: '0.9em', fontWeight: 600 }}>{totalDonePercent}%</span>
         </div>
         <div
           style={{
@@ -123,13 +138,30 @@ export function JobQueue({
             background: 'var(--bg-secondary)',
             overflow: 'hidden',
             border: '1px solid var(--border-color)',
+            display: 'flex',
           }}
         >
           <div
             style={{
               height: '100%',
               width: `${completedPercent}%`,
-              background: 'var(--accent-primary)',
+              background: 'var(--accent-success)',
+              transition: 'width 0.3s ease',
+            }}
+          />
+          <div
+            style={{
+              height: '100%',
+              width: `${errorsPercent}%`,
+              background: 'var(--accent-danger)',
+              transition: 'width 0.3s ease',
+            }}
+          />
+          <div
+            style={{
+              height: '100%',
+              width: `${skippedPercent}%`,
+              background: 'var(--accent-warning)',
               transition: 'width 0.3s ease',
             }}
           />
@@ -167,7 +199,7 @@ export function JobQueue({
             </tr>
           </thead>
           <tbody>
-            {jobs.map((job) => (
+            {sortedJobs.map((job) => (
               <tr key={job.index}>
                 <td>
                   <span
@@ -182,6 +214,27 @@ export function JobQueue({
                   />
                   {STATUS_LABELS[job.status]}
                   {job.retryCount ? ` (R${job.retryCount})` : ''}
+                  {job.error && (
+                    <span
+                      title={job.error}
+                      style={{
+                        marginLeft: '6px',
+                        cursor: 'help',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: '14px',
+                        height: '14px',
+                        borderRadius: '50%',
+                        background: job.status === 'error' ? 'var(--accent-danger)' : 'var(--accent-warning)',
+                        color: 'white',
+                        fontSize: '10px',
+                        fontWeight: 'bold',
+                      }}
+                    >
+                      i
+                    </span>
+                  )}
                 </td>
                 <td>{job.country}</td>
                 <td>{job.domain}</td>

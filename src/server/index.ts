@@ -2057,10 +2057,15 @@ async function handleMessage(
 
       } catch (error) {
         console.error(`[Server] Browser scrape failed for ${url}:`, error);
+        // Make error message more user-friendly
+        let errorMsg = error instanceof Error ? error.message : 'Scrape failed';
+        if (errorMsg.includes('No containers found')) {
+          errorMsg = 'No products found - page may have changed or selector is outdated';
+        }
         send(ws, 'batch:scrapeResult', {
           browserId,
           success: false,
-          error: error instanceof Error ? error.message : 'Scrape failed',
+          error: errorMsg,
           items: [],
         }, sessionId);
       }

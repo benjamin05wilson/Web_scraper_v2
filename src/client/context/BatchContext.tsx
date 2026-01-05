@@ -172,7 +172,33 @@ export function BatchProvider({ children }: BatchProviderProps) {
 
     // Check for missing configs - need to check domain+country combinations
     const domainCountryPairs = [...new Set(newJobs.map(j => `${j.domain}:${j.country}`))];
-    await checkConfigs(domainCountryPairs, newJobs);
+    const missingSet = await checkConfigs(domainCountryPairs, newJobs);
+
+    // Auto-mark jobs as skipped if their config doesn't exist
+    if (missingSet && missingSet.size > 0) {
+      const skippedJobs = newJobs.filter(j => missingSet.has(`${j.domain}:${j.country}`));
+      const skippedCount = skippedJobs.length;
+      const pendingJobs = newJobs.filter(j => !missingSet.has(`${j.domain}:${j.country}`));
+
+      setJobs(prev => prev.map(j => {
+        const key = `${j.domain}:${j.country}`;
+        if (missingSet.has(key)) {
+          return { ...j, status: 'skipped' as const, error: `No config for domain: ${j.domain}` };
+        }
+        return j;
+      }));
+      setProgress(prev => ({
+        ...prev,
+        pending: prev.pending - skippedCount,
+        skipped: prev.skipped + skippedCount,
+      }));
+
+      // Re-initialize scheduler with only pending jobs (exclude skipped)
+      jobQueueRef.current = [...pendingJobs];
+      domainSchedulerRef.current.initialize(pendingJobs);
+
+      console.log(`[BatchContext] Auto-skipped ${skippedCount} jobs with missing configs`);
+    }
   }, []);
 
   // Check which domain+country pairs have configs
@@ -270,8 +296,10 @@ export function BatchProvider({ children }: BatchProviderProps) {
       setMissingConfigs(missing);
 
       console.log(`[BatchContext] Loaded ${configMap.size} configs, missing: ${missing.length}`);
+      return new Set(missing);
     } catch (err) {
       console.error('Failed to check configs:', err);
+      return new Set<string>();
     }
   };
 
@@ -312,22 +340,32 @@ export function BatchProvider({ children }: BatchProviderProps) {
     setIsRunning(true);
     setIsPaused(false);
 
-    // Reset progress
+    // Count already skipped jobs (missing configs)
+    const alreadySkipped = jobs.filter(j => j.status === 'skipped');
+    const skippedCount = alreadySkipped.length;
+    const pendingJobs = jobs.filter(j => j.status !== 'skipped');
+
+    // Reset progress - preserve skipped count
     setProgress({
       total: jobs.length,
       completed: 0,
       errors: 0,
-      skipped: 0,
-      pending: jobs.length,
+      skipped: skippedCount,
+      pending: pendingJobs.length,
       running: 0,
       itemsScraped: 0,
     });
 
-    // Reset job statuses to pending
-    setJobs(prev => prev.map(j => ({ ...j, status: 'pending' as const, itemCount: 0, results: undefined, error: undefined })));
+    // Reset job statuses to pending, but keep skipped jobs as skipped
+    setJobs(prev => prev.map(j => {
+      if (j.status === 'skipped') {
+        return j; // Keep skipped jobs unchanged
+      }
+      return { ...j, status: 'pending' as const, itemCount: 0, results: undefined, error: undefined };
+    }));
 
-    // Reset job queue and domain scheduler with fresh jobs
-    const freshJobs = jobs.map(j => ({ ...j, status: 'pending' as const }));
+    // Reset job queue and domain scheduler with only pending jobs (exclude skipped)
+    const freshJobs = pendingJobs.map(j => ({ ...j, status: 'pending' as const }));
     jobQueueRef.current = [...freshJobs];
     domainSchedulerRef.current.initialize(freshJobs);
     console.log(`[BatchContext] Starting batch with ${jobQueueRef.current.length} jobs`);
@@ -553,8 +591,32 @@ export function BatchProvider({ children }: BatchProviderProps) {
     const config = configsRef.current.get(configKey) || configsRef.current.get(job.domain);
 
     if (!config) {
-      console.error(`[BatchContext] No config for ${configKey}`);
-      handleJobComplete(slotId, browserId, job, false, [], 0, 'No config found');
+      console.log(`[BatchContext] No config for ${configKey} - skipping`);
+
+      // Mark job as skipped (not error)
+      setJobs(prev => prev.map(j =>
+        j.index === job.index
+          ? { ...j, status: 'skipped', error: `No config for domain: ${job.domain}`, completedAt: Date.now() }
+          : j
+      ));
+
+      // Update progress - decrement running (was incremented before), increment skipped
+      setProgress(prev => ({
+        ...prev,
+        running: prev.running - 1,
+        skipped: prev.skipped + 1,
+      }));
+
+      // Mark completed in scheduler and clear slot
+      domainSchedulerRef.current.markCompleted(slotId, true);
+      slotJobsRef.current.delete(slotId);
+
+      setBrowserSlots(prev => prev.map(s =>
+        s.id === slotId ? { ...s, status: 'idle', currentJob: undefined } : s
+      ));
+
+      // Continue with next job
+      processJobWithBrowser(slotId, browserId);
       return;
     }
 
@@ -609,13 +671,23 @@ export function BatchProvider({ children }: BatchProviderProps) {
     // Mark job complete
     const finalStatus = success && count > 0 ? 'completed' : 'error';
 
+    // Determine error message
+    let errorMessage = error;
+    if (!errorMessage && finalStatus === 'error') {
+      if (count === 0) {
+        errorMessage = 'No products found on page';
+      } else if (!success) {
+        errorMessage = 'Scrape failed';
+      }
+    }
+
     setJobs(prev => prev.map(j =>
       j.index === job.index ? {
         ...j,
         status: finalStatus as 'completed' | 'error',
         itemCount: count,
         results: items,
-        error: error,
+        error: errorMessage,
         completedAt: Date.now(),
       } : j
     ));
