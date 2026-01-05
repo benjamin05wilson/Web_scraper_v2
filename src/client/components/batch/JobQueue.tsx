@@ -63,7 +63,7 @@ export function JobQueue({
         <h2 style={{ fontSize: '1.25em', margin: 0 }}>4. Processing Queue</h2>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
           <span style={{ color: 'var(--text-secondary)', fontSize: '0.9em', marginRight: '15px' }}>
-            {progress.completed} / {progress.total} completed
+            {progress.completed + progress.errors + progress.skipped} / {progress.total} processed
           </span>
 
           {!isRunning && (

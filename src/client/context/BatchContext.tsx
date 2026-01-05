@@ -197,6 +197,13 @@ export function BatchProvider({ children }: BatchProviderProps) {
       jobQueueRef.current = [...pendingJobs];
       domainSchedulerRef.current.initialize(pendingJobs);
 
+      // Filter Next URLs - only exclude if ALL jobs referencing that Next URL are skipped
+      // (keep a Next URL if at least one pending job uses it)
+      const pendingNextUrls = new Set(pendingJobs.map(j => j.nextUrl));
+      const filteredNextUrls = nextUrls.filter(n => pendingNextUrls.has(n.url));
+      setNextUrlsData(filteredNextUrls);
+      console.log(`[BatchContext] Filtered Next URLs: ${nextUrls.length} -> ${filteredNextUrls.length} (keeping only those with pending jobs)`);
+
       console.log(`[BatchContext] Auto-skipped ${skippedCount} jobs with missing configs`);
     }
   }, []);
