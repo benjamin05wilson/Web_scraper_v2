@@ -1,0 +1,28 @@
+{
+  "competitor_type": "local",
+  "country": "Malta",
+  "url": "https://www.theatrium.com.mt/textiles/bedspreads-duvets-quilts",
+  "selectors": {
+    "Title": [
+      "p:nth-of-type(1)"
+    ],
+    "Price": [
+      "p:nth-of-type(2) > span:nth-of-type(2)"
+    ],
+    "URL": [
+      ":self"
+    ],
+    "Image": [
+      "img.img-fluid"
+    ]
+  },
+  "itemContainer": "div.col-6 a",
+  "pagination": {
+    "type": "infinite_scroll",
+    "scrollPositions": [
+      3726
+    ],
+    "productsPerPage": 36,
+    "max_pages": 10
+  }
+}

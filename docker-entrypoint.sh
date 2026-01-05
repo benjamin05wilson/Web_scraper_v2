@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# Clean up stale Xvfb lock files from previous runs
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
+
+# Kill any existing Xvfb processes
+pkill -9 Xvfb 2>/dev/null || true
+sleep 1
+
 # Start Xvfb (virtual framebuffer) for headful browser support
 echo "Starting Xvfb virtual display on :99..."
 Xvfb :99 -screen 0 1920x1080x24 -ac &

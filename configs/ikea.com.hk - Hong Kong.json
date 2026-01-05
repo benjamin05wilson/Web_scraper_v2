@@ -1,0 +1,32 @@
+{
+  "competitor_type": "global",
+  "country": "Hong Kong",
+  "url": "https://www.ikea.com.hk/en/products/bed-linen/duvet-cover-sets",
+  "selectors": {
+    "Title": [
+      "h4.itemFacts.line-clamp.font-weight-normal"
+    ],
+    "Price": [
+      "div.itemPriceBox"
+    ],
+    "URL": [
+      "div.card-header > a"
+    ],
+    "Image": [
+      "img.card-img-top.lazyloaded"
+    ]
+  },
+  "itemContainer": ".itemBlock.itemPlp .card:not(.feature)",
+  "dismiss_actions": [
+    {
+      "selector": "[class*=\"banner\"] text=\"I understand\"",
+      "text": "I understand"
+    }
+  ],
+  "pagination": {
+    "type": "next_page",
+    "selector": "a.page-link",
+    "productsPerPage": 7,
+    "max_pages": 10
+  }
+}

@@ -1,7 +1,7 @@
 {
   "competitor_type": "global",
-  "country": "Ireland",
-  "url": "https://www.ikea.com/ie/en/cat/duvet-covers-bedding-sets-10680/",
+  "country": "Qatar",
+  "url": "https://www.ikea.com/qa/en/cat/duvet-covers-bedding-sets-10680/",
   "selectors": {
     "Title": [
       "span.plp-text.plp-typography-label-m.plp-typography-regular.plp-price-module__description"
@@ -21,6 +21,10 @@
     {
       "selector": "[class*=\"banner\"] text=\"Accept all\"",
       "text": "Accept all"
+    },
+    {
+      "selector": "#onetrust-accept-btn-handler",
+      "text": "Accept"
     }
   ],
   "pagination": {

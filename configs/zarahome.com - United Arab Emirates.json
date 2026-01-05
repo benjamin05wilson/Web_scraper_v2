@@ -1,0 +1,35 @@
+{
+  "competitor_type": "global",
+  "country": "United Arab Emirates",
+  "url": "https://www.zarahome.com/ae/bedroom-duvet-covers-n946",
+  "selectors": {
+    "Title": [
+      "h3.product-info__product-name > a > span"
+    ],
+    "Price": [
+      "span.price-double__current.inline-avoid-rtl > span:nth-of-type(2)"
+    ],
+    "URL": [
+      "h3.product-info__product-name > a"
+    ],
+    "Image": [
+      "img.image-item.image-item--double"
+    ]
+  },
+  "itemContainer": "article.product-item",
+  "dismiss_actions": [
+    {
+      "selector": "[aria-label*=\"cookie\" i] button",
+      "text": "Reject All"
+    },
+    {
+      "selector": "[class*=\"overlay\"] [class*=\"close\"]",
+      "text": ""
+    }
+  ],
+  "pagination": {
+    "type": "infinite_scroll",
+    "productsPerPage": 24,
+    "max_pages": 10
+  }
+}

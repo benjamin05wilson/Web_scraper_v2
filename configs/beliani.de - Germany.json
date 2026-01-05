@@ -1,0 +1,31 @@
+{
+  "competitor_type": "local",
+  "country": "Germany",
+  "url": "https://www.beliani.de/textiles/duvet-covers/",
+  "selectors": {
+    "Title": [
+      "span.title-line"
+    ],
+    "Price": [
+      "div.price-box-price-text > a > span"
+    ],
+    "URL": [
+      "a.itemBox"
+    ],
+    "Image": [
+      "img.white_image.cover_image"
+    ]
+  },
+  "itemContainer": "div.product-teaser.default_white_image",
+  "dismiss_actions": [
+    {
+      "selector": "input[value='Accept All Cookies']",
+      "text": "Accept All Cookies"
+    }
+  ],
+  "pagination": {
+    "type": "infinite_scroll",
+    "productsPerPage": 24,
+    "max_pages": 10
+  }
+}

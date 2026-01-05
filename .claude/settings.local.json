@@ -15,7 +15,8 @@
       "Bash(timeout:*)",
       "Bash(docker compose build:*)",
       "Bash(docker compose up:*)",
-      "Bash(docker compose logs:*)"
+      "Bash(docker compose logs:*)",
+      "Bash(docker compose:*)"
     ]
   }
 }

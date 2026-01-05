@@ -1,7 +1,7 @@
 {
   "competitor_type": "local",
-  "country": "Germany",
-  "url": "https://www.ikea.com/de/en/cat/duvet-cover-sets-10680/",
+  "country": "Saudi Arabia",
+  "url": "https://www.ikea.com/sa/en/cat/duvet-covers-bedding-sets-10680/",
   "selectors": {
     "Title": [
       "span.plp-text.plp-typography-label-m.plp-typography-regular.plp-price-module__description"
@@ -16,11 +16,15 @@
       "img.plp-image.plp-product-variant__img.plp-product-variant__img--selected"
     ]
   },
-  "itemContainer": "div[data-testid=\"plp-product-card\"]:not([data-product-compact=\"true\"])",
+  "itemContainer": "div.plp-fragment-wrapper.plp-fragment-wrapper--grid",
   "dismiss_actions": [
     {
       "selector": "[class*=\"banner\"] text=\"Accept all cookies\"",
       "text": "Accept all cookies"
+    },
+    {
+      "selector": "button[class*=\"close\"]:not([class*=\"closeout\"])",
+      "text": ""
     }
   ],
   "pagination": {

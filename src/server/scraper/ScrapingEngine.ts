@@ -25,12 +25,121 @@ export class ScrapingEngine {
     this.cdp = cdp;
   }
 
+  /**
+   * Run a function with a timeout - returns result or throws on timeout
+   */
+  private async withTimeout<T>(
+    operation: () => Promise<T>,
+    timeoutMs: number,
+    operationName: string
+  ): Promise<T> {
+    return Promise.race([
+      operation(),
+      new Promise<T>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`${operationName} timed out after ${timeoutMs / 1000}s`)),
+          timeoutMs
+        )
+      ),
+    ]);
+  }
+
+  /**
+   * Check if page is still usable (not closed)
+   */
+  private isPageClosed(): boolean {
+    try {
+      // Accessing url() on a closed page throws
+      this.page.url();
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Check if the page is showing bot protection (Cloudflare, etc.)
+   * Returns error message if blocked, null if OK
+   */
+  private async checkForBotProtection(): Promise<string | null> {
+    if (this.isPageClosed()) {
+      return 'Page was closed';
+    }
+
+    try {
+      const blockInfo = await this.page.evaluate(() => {
+        const pageTitle = document.title.toLowerCase();
+        const bodyText = document.body?.innerText?.toLowerCase() || '';
+
+        // Cloudflare challenge
+        if (pageTitle.includes('just a moment') ||
+            pageTitle.includes('attention required') ||
+            bodyText.includes('checking your browser') ||
+            bodyText.includes('ray id') ||
+            document.querySelector('#challenge-running, #challenge-form, .cf-browser-verification')) {
+          return 'Cloudflare challenge detected';
+        }
+
+        // CAPTCHA
+        if (document.querySelector('.g-recaptcha, [data-sitekey], .h-captcha, #captcha, [class*="captcha"]')) {
+          return 'CAPTCHA detected';
+        }
+
+        // Generic bot detection pages
+        if (bodyText.includes('access denied') ||
+            bodyText.includes('blocked') && bodyText.includes('bot') ||
+            pageTitle.includes('access denied') ||
+            pageTitle.includes('robot')) {
+          return 'Access denied / Bot blocked';
+        }
+
+        return null;
+      });
+
+      return blockInfo;
+    } catch (error) {
+      // If evaluation fails, page might be closed or in bad state
+      return `Page evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
   // =========================================================================
   // MAIN SCRAPE EXECUTION
   // =========================================================================
 
+  // Overall timeout for entire scrape operation (5 minutes per URL)
+  private static readonly SCRAPE_TIMEOUT = 5 * 60 * 1000;
+
+  // Per-strategy timeouts to prevent individual phases from hanging
+  private static readonly SCROLL_STRATEGY_TIMEOUT = 60 * 1000; // 60 seconds per scroll strategy
+  private static readonly NAVIGATION_TIMEOUT = 30 * 1000; // 30 seconds for page navigation
+
   async execute(config: ScraperConfig): Promise<ScrapeResult> {
     const startTime = Date.now();
+
+    // Wrap entire execution in a timeout to prevent freezing
+    return Promise.race([
+      this.executeInternal(config, startTime),
+      new Promise<ScrapeResult>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Scrape timeout after ${ScrapingEngine.SCRAPE_TIMEOUT / 1000}s`)),
+          ScrapingEngine.SCRAPE_TIMEOUT
+        )
+      ),
+    ]).catch((error) => {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`[ScrapingEngine] TIMEOUT/ERROR: ${errorMessage}`);
+      return {
+        success: false,
+        items: [],
+        pagesScraped: 0,
+        duration: Date.now() - startTime,
+        errors: [errorMessage],
+      };
+    });
+  }
+
+  private async executeInternal(config: ScraperConfig, startTime: number): Promise<ScrapeResult> {
     const allItems: ScrapedItem[] = [];
     let pagesScraped = 0;
     const targetProducts = config.targetProducts || 0; // 0 = unlimited
@@ -75,9 +184,22 @@ export class ScrapingEngine {
       console.log(`[ScrapingEngine] Navigating to: ${config.startUrl}`);
       await this.page.goto(config.startUrl, {
         waitUntil: 'domcontentloaded',
-        timeout: 30000,
+        timeout: ScrapingEngine.NAVIGATION_TIMEOUT,
       });
       console.log(`[ScrapingEngine] Navigation complete, current URL: ${this.page.url()}`);
+
+      // Check for bot protection immediately after navigation
+      const botBlockCheck = await this.checkForBotProtection();
+      if (botBlockCheck) {
+        console.error(`[ScrapingEngine] Bot protection detected: ${botBlockCheck}`);
+        return {
+          success: false,
+          items: [],
+          pagesScraped: 0,
+          duration: Date.now() - startTime,
+          errors: [`Site blocked scraper: ${botBlockCheck}`],
+        };
+      }
 
       // Execute pre-actions (popups, cookies, etc.) if defined
       if (config.preActions && config.preActions.actions.length > 0) {
@@ -85,16 +207,32 @@ export class ScrapingEngine {
         await this.executePreActions(config.preActions.actions);
       }
 
-      // Auto-scroll to load lazy content if enabled
+      // Always try to dismiss common cookie banners (even if no pre-actions defined)
+      await this.dismissCommonCookieBanners();
+
+      // Auto-scroll to load lazy content if enabled (with timeout)
       if (config.autoScroll !== false) {
         // Check if we have recorded scroll positions to replay
         const scrollPositions = config.advanced?.scrollPositions;
-        if (scrollPositions && scrollPositions.length > 0) {
-          console.log(`[ScrapingEngine] Using ${scrollPositions.length} recorded scroll positions...`);
-          await this.replayScrollPositions(scrollPositions, targetProducts, config.selectors);
-        } else {
-          console.log('[ScrapingEngine] Auto-scrolling to load lazy content...');
-          await this.autoScrollToLoadContent(config.selectors, targetProducts);
+        try {
+          if (scrollPositions && scrollPositions.length > 0) {
+            console.log(`[ScrapingEngine] Using ${scrollPositions.length} recorded scroll positions...`);
+            await this.withTimeout(
+              () => this.replayScrollPositions(scrollPositions, targetProducts, config.selectors),
+              ScrapingEngine.SCROLL_STRATEGY_TIMEOUT,
+              'Replay scroll positions'
+            );
+          } else {
+            console.log('[ScrapingEngine] Auto-scrolling to load lazy content...');
+            await this.withTimeout(
+              () => this.autoScrollToLoadContent(config.selectors, targetProducts),
+              ScrapingEngine.SCROLL_STRATEGY_TIMEOUT * 2, // Give auto-scroll more time (2 strategies)
+              'Auto-scroll'
+            );
+          }
+        } catch (scrollError) {
+          // Scroll timeout is non-fatal - continue with whatever content loaded
+          console.warn(`[ScrapingEngine] Scroll timeout (non-fatal): ${scrollError instanceof Error ? scrollError.message : String(scrollError)}`);
         }
       }
 
@@ -102,6 +240,12 @@ export class ScrapingEngine {
       const maxPages = config.pagination?.enabled ? config.pagination.maxPages : 1;
 
       for (let pageNum = 0; pageNum < maxPages; pageNum++) {
+        // Check if page is still usable before each page scrape
+        if (this.isPageClosed()) {
+          console.log('[ScrapingEngine] Page closed during pagination, stopping');
+          break;
+        }
+
         console.log(`[ScrapingEngine] Scraping page ${pageNum + 1}/${maxPages}`);
 
         // Extract data from current page
@@ -1717,6 +1861,12 @@ export class ScrapingEngine {
     let currentScrollY = 0;
 
     while (iteration < maxIterations && noChangeAtBottomCount < noChangeThreshold) {
+      // Check if page is still usable
+      if (this.isPageClosed()) {
+        console.log('[ScrapingEngine] Page closed during scroll, stopping');
+        break;
+      }
+
       // Check if we've reached target products BEFORE scrolling more
       if (targetProducts > 0 && totalElementCount >= targetProducts) {
         console.log(`[ScrapingEngine] Reached target of ${targetProducts} products, stopping scroll`);
@@ -1821,6 +1971,12 @@ export class ScrapingEngine {
       let iterationsWithoutNewContent = 0;
 
       while (iteration < maxIterations && noChangeAtBottomCount < noChangeThreshold) {
+        // Check if page is still usable
+        if (this.isPageClosed()) {
+          console.log('[ScrapingEngine] Page closed during scroll-up, stopping');
+          break;
+        }
+
         // Check if we've reached target products
         if (targetProducts > 0 && totalElementCount >= targetProducts) {
           console.log(`[ScrapingEngine] Reached target of ${targetProducts} products, stopping scroll-up`);
@@ -2008,29 +2164,37 @@ export class ScrapingEngine {
         console.log(`[ScrapingEngine] Pre-action: ${action.type} on ${action.selector}`);
 
         try {
-          // Check if element exists first
-          const exists = await this.page
-            .waitForSelector(action.selector, { timeout: 3000, state: 'visible' })
-            .then(() => true)
-            .catch(() => false);
+          // Use locator API which handles text= selectors properly
+          // waitForSelector doesn't support text= syntax, but locator does
+          const locator = this.page.locator(action.selector);
 
-          if (!exists) {
+          // Check if element exists and is visible
+          const count = await locator.count();
+          if (count === 0) {
             console.log(`[ScrapingEngine] Pre-action element not found, skipping: ${action.selector}`);
-            continue; // Skip if not found (popup might not appear)
+            continue;
+          }
+
+          // Wait briefly for visibility
+          const isVisible = await locator.first().isVisible().catch(() => false);
+          if (!isVisible) {
+            // Try waiting a bit for it to become visible
+            await locator.first().waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
           }
 
           switch (action.type) {
             case 'click':
-              await this.page.click(action.selector, { timeout: 3000 });
+              await locator.first().click({ timeout: 3000 });
+              console.log(`[ScrapingEngine] Pre-action click successful: ${action.selector}`);
               break;
             case 'type':
               if (action.value) {
-                await this.page.fill(action.selector, action.value, { timeout: 3000 });
+                await locator.first().fill(action.value, { timeout: 3000 });
               }
               break;
             case 'select':
               if (action.value) {
-                await this.page.selectOption(action.selector, action.value, { timeout: 3000 });
+                await locator.first().selectOption(action.value, { timeout: 3000 });
               }
               break;
           }
@@ -2047,6 +2211,67 @@ export class ScrapingEngine {
     } finally {
       // Remove navigation blocking after pre-actions complete
       await this.page.unroute('**/*');
+    }
+  }
+
+  /**
+   * Attempt to dismiss common cookie consent banners by clicking accept buttons
+   * This runs automatically on every scrape to handle popups
+   */
+  private async dismissCommonCookieBanners(): Promise<void> {
+    const cookieButtonSelectors = [
+      // Input buttons (beliani, etc.) - check these first as they're specific
+      'input[type="button"][value*="Accept" i]',
+      'input[type="button"][value*="Cookies" i]',
+      'input[type="submit"][value*="Accept" i]',
+      // IKEA specific
+      'button:has-text("Accept all cookies")',
+      'button:has-text("Accept all")',
+      // Generic accept buttons
+      'button:has-text("Accept")',
+      'button:has-text("Agree")',
+      'button:has-text("Allow all")',
+      'button:has-text("Allow cookies")',
+      'button:has-text("I agree")',
+      'button:has-text("Got it")',
+      'button:has-text("OK")',
+      // OneTrust (very common)
+      '#onetrust-accept-btn-handler',
+      'button[id*="accept"]',
+      // Cookiebot
+      '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+      // Generic by class
+      '[class*="cookie"] button[class*="accept"]',
+      '[class*="consent"] button[class*="accept"]',
+      '[class*="cookie"] button[class*="agree"]',
+      '[class*="gdpr"] button[class*="accept"]',
+      // Input buttons in cookie popups
+      '.cookies_popup input[type="button"]',
+      '[class*="cookie"] input[type="button"]',
+    ];
+
+    try {
+      for (const selector of cookieButtonSelectors) {
+        try {
+          const locator = this.page.locator(selector).first();
+          const isVisible = await locator.isVisible().catch(() => false);
+
+          if (isVisible) {
+            await locator.click({ timeout: 2000 });
+            console.log(`[ScrapingEngine] Dismissed cookie banner with: ${selector}`);
+            // Wait for banner to close
+            await this.page.waitForTimeout(500);
+            return; // Success - stop trying other selectors
+          }
+        } catch {
+          // This selector didn't work, try next
+          continue;
+        }
+      }
+    } catch (error) {
+      // Non-fatal - some pages don't have cookie banners
+      const msg = error instanceof Error ? error.message : String(error);
+      console.log(`[ScrapingEngine] Cookie banner dismiss failed (non-fatal): ${msg}`);
     }
   }
 

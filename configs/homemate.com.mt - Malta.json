@@ -1,0 +1,26 @@
+{
+  "competitor_type": "local",
+  "country": "Malta",
+  "url": "https://www.homemate.com.mt/product-category/bedspreads",
+  "selectors": {
+    "Title": [
+      "p.details"
+    ],
+    "Price": [
+      "div.float-left"
+    ],
+    "URL": [
+      "a:nth-of-type(1)"
+    ],
+    "Image": [
+      "img.img-fluid"
+    ]
+  },
+  "itemContainer": "div.col-12.col-sm-4.pb-1",
+  "pagination": {
+    "type": "next_page",
+    "selector": "#PageContent_ContentControl_ctl00_LoadMoreItems",
+    "productsPerPage": 22,
+    "max_pages": 10
+  }
+}
