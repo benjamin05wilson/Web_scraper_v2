@@ -20,7 +20,7 @@
   "itemContainer": "article.product",
   "dismiss_actions": [
     {
-      "selector": "[role=\"dialog\"] text=\"OK\"",
+      "selector": "[role=\"dialog\"] button:has-text(\"OK\")",
       "text": "OK"
     }
   ],

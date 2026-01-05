@@ -19,7 +19,7 @@
   "itemContainer": ".itemBlock.itemPlp .card:not(.feature)",
   "dismiss_actions": [
     {
-      "selector": "[class*=\"banner\"] text=\"I understand\"",
+      "selector": "button:has-text(\"Accept all cookies\")",
       "text": "I understand"
     }
   ],

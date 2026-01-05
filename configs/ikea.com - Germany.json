@@ -19,7 +19,7 @@
   "itemContainer": "div[data-testid=\"plp-product-card\"]:not([data-product-compact=\"true\"])",
   "dismiss_actions": [
     {
-      "selector": "[class*=\"banner\"] text=\"Accept all cookies\"",
+      "selector": "button:has-text(\"Accept all cookies\")",
       "text": "Accept all cookies"
     }
   ],

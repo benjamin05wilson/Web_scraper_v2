@@ -14,6 +14,7 @@ import type {
   NetworkExtractionConfig,
 } from '../../shared/types.js';
 import { NetworkInterceptor, type InterceptedProduct } from './handlers/NetworkInterceptor.js';
+import { PopupHandler } from './PopupHandler.js';
 
 export class ScrapingEngine {
   private page: Page;
@@ -80,9 +81,18 @@ export class ScrapingEngine {
           return 'Cloudflare challenge detected';
         }
 
-        // CAPTCHA
-        if (document.querySelector('.g-recaptcha, [data-sitekey], .h-captcha, #captcha, [class*="captcha"]')) {
-          return 'CAPTCHA detected';
+        // CAPTCHA - only trigger if CAPTCHA is actually visible and blocking the page
+        const captchaElements = document.querySelectorAll('.g-recaptcha, [data-sitekey], .h-captcha, #captcha');
+        for (const el of captchaElements) {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          // Only count as blocking if visible and has meaningful size
+          if (rect.width > 50 && rect.height > 50 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              style.opacity !== '0') {
+            return 'CAPTCHA detected';
+          }
         }
 
         // Generic bot detection pages
@@ -107,12 +117,29 @@ export class ScrapingEngine {
   // MAIN SCRAPE EXECUTION
   // =========================================================================
 
-  // Overall timeout for entire scrape operation (5 minutes per URL)
-  private static readonly SCRAPE_TIMEOUT = 5 * 60 * 1000;
+  // Tiered timeout system - balanced for heavy sites like IKEA
+  private static readonly TIMEOUTS = {
+    // Navigation: How long to wait for page to load (heavy JS sites need more time)
+    NAVIGATION: 45 * 1000,         // 45 seconds for heavy sites like IKEA
 
-  // Per-strategy timeouts to prevent individual phases from hanging
-  private static readonly SCROLL_STRATEGY_TIMEOUT = 60 * 1000; // 60 seconds per scroll strategy
-  private static readonly NAVIGATION_TIMEOUT = 30 * 1000; // 30 seconds for page navigation
+    // Scroll: How long for lazy-loading scroll operations
+    SCROLL_STRATEGY: 60 * 1000,    // 60 seconds for infinite scroll
+
+    // Extraction: How long for DOM extraction per page
+    EXTRACTION: 15 * 1000,         // 15 seconds
+
+    // Per-page total: Max time for a single page (nav + scroll + extract)
+    PER_PAGE: 90 * 1000,           // 90 seconds per page
+
+    // Overall: Max time for entire scrape operation
+    OVERALL_SIMPLE: 2 * 60 * 1000,  // 2 minutes for simple sites
+    OVERALL_COMPLEX: 3 * 60 * 1000, // 3 minutes for complex sites
+  };
+
+  // Legacy constants for backward compatibility
+  private static readonly SCRAPE_TIMEOUT = ScrapingEngine.TIMEOUTS.OVERALL_COMPLEX;
+  private static readonly SCROLL_STRATEGY_TIMEOUT = ScrapingEngine.TIMEOUTS.SCROLL_STRATEGY;
+  private static readonly NAVIGATION_TIMEOUT = ScrapingEngine.TIMEOUTS.NAVIGATION;
 
   async execute(config: ScraperConfig): Promise<ScrapeResult> {
     const startTime = Date.now();
@@ -207,8 +234,17 @@ export class ScrapingEngine {
         await this.executePreActions(config.preActions.actions);
       }
 
-      // Always try to dismiss common cookie banners (even if no pre-actions defined)
-      await this.dismissCommonCookieBanners();
+      // Use full PopupHandler to auto-close popups (same as builder UI)
+      try {
+        const popupHandler = new PopupHandler(this.page);
+        const popupResult = await popupHandler.autoClosePopups();
+        if (popupResult.closed.length > 0) {
+          console.log(`[ScrapingEngine] PopupHandler closed ${popupResult.closed.length} popup(s)`);
+        }
+      } catch (popupError) {
+        // Non-fatal - continue with scraping
+        console.log(`[ScrapingEngine] PopupHandler error (non-fatal): ${popupError}`);
+      }
 
       // Auto-scroll to load lazy content if enabled (with timeout)
       if (config.autoScroll !== false) {
@@ -2144,11 +2180,18 @@ export class ScrapingEngine {
     // Block navigation during pre-actions to prevent accidental redirects
     // (e.g., clicking "Accept Cookies" might trigger a click on element behind it)
     const currentUrl = this.page.url();
+    const currentHost = new URL(currentUrl).hostname;
     await this.page.route('**/*', async (route) => {
       const request = route.request();
-      if (request.isNavigationRequest()) {
+      // Only block top-level frame navigations that go to a different page on same host
+      // Allow iframe navigations (recaptcha, tracking pixels, etc.)
+      if (request.isNavigationRequest() && request.frame() === this.page.mainFrame()) {
         const targetUrl = request.url();
-        if (targetUrl === currentUrl || targetUrl.startsWith(currentUrl + '#')) {
+        const targetHost = new URL(targetUrl).hostname;
+        // Allow same URL, hash changes, or different hosts (external links)
+        if (targetUrl === currentUrl ||
+            targetUrl.startsWith(currentUrl + '#') ||
+            targetHost !== currentHost) {
           await route.continue();
         } else {
           console.log(`[ScrapingEngine] Blocked navigation during pre-actions: ${targetUrl}`);

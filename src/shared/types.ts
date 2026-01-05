@@ -74,7 +74,24 @@ export type WSMessageType =
   | 'network:getProducts'
   | 'network:products'
   | 'fields:autoLabel'
-  | 'fields:labeled';
+  | 'fields:labeled'
+  // Batch processing messages
+  | 'batch:start'
+  | 'batch:stop'
+  | 'batch:poolReady'
+  | 'batch:stopped'
+  | 'batch:error'
+  | 'batch:httpScrape'
+  | 'batch:httpResult'
+  | 'batch:acquireBrowser'
+  | 'batch:browserAcquired'
+  | 'batch:browserUnavailable'
+  | 'batch:releaseBrowser'
+  | 'batch:updateQueueDepth'
+  | 'batch:browserScrape'
+  | 'batch:scrapeResult'
+  | 'batch:getPoolStats'
+  | 'batch:poolStats';
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;
@@ -724,4 +741,51 @@ export interface NetworkPatternDetectedPayload {
 /** Payload for network:products message */
 export interface NetworkProductsPayload {
   products: InterceptedProduct[];
+}
+
+// ============================================================================
+// BATCH POOL TYPES - For browser pool and auto-scaling
+// ============================================================================
+
+/** Browser pool statistics */
+export interface PoolStats {
+  total: number;
+  idle: number;
+  busy: number;
+  unhealthy: number;
+}
+
+/** Browser pool configuration */
+export interface BatchPoolConfig {
+  warmupCount: number;
+  maxSlots: number;
+  minSize?: number;
+  idleTimeoutMs?: number;
+  maxJobsPerBrowser?: number;
+}
+
+/** Domain scheduling statistics */
+export interface DomainStats {
+  domain: string;
+  pending: number;
+  active: number;
+  httpSuccessRate?: number;
+}
+
+/** HTTP scrape result (from Python BS4 scraper) */
+export interface HttpScrapeResult {
+  success: boolean;
+  items: unknown[];
+  count: number;
+  needsBrowser: boolean;
+  reason: string | null;
+}
+
+/** Auto-scaler status */
+export interface ScalerStatus {
+  isRunning: boolean;
+  queueDepth: number;
+  availableMemoryMb: number;
+  lastScaleTime: number;
+  poolStats: PoolStats;
 }

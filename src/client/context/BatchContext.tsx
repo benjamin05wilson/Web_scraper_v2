@@ -13,10 +13,14 @@ import { parseBatchCSV } from '../utils/csvUtils';
 import { extractDomain } from '../utils/domainUtils';
 import type { NextPricingResult } from '../utils/export/batchExport';
 import { downloadBatchResults, transformToCompetitorPricing } from '../utils/export/batchExport';
+import { DomainScheduler } from '../utils/DomainScheduler';
 
-const NUM_BROWSER_SLOTS = 5;
+// Batch processing constants - 5 browsers for parallel scraping
+const DEFAULT_WARMUP_COUNT = 5; // Pre-warm exactly 5 browsers
+const MAX_BROWSER_SLOTS = 5; // Maximum 5 browser slots (same as single scraper, just parallel)
 const MIN_ITEMS_FOR_SUCCESS = 10; // Retry if fewer items than this
 const MAX_RETRIES = 1; // Maximum retry attempts per job
+// HTTP_CONCURRENCY is configured server-side in HttpScraperBridge
 
 interface BatchContextValue {
   jobs: BatchJob[];
@@ -63,12 +67,7 @@ interface BatchProviderProps {
 
 export function BatchProvider({ children }: BatchProviderProps) {
   const [jobs, setJobs] = useState<BatchJob[]>([]);
-  const [browserSlots, setBrowserSlots] = useState<BrowserSlot[]>(
-    Array.from({ length: NUM_BROWSER_SLOTS }, (_, i) => ({
-      id: i,
-      status: 'idle',
-    }))
-  );
+  const [browserSlots, setBrowserSlots] = useState<BrowserSlot[]>([]);
   const [progress, setProgress] = useState<BatchProgress>({
     total: 0,
     completed: 0,
@@ -80,8 +79,10 @@ export function BatchProvider({ children }: BatchProviderProps) {
   });
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [fastMode, setFastModeState] = useState(false);
+  const [fastMode, setFastModeState] = useState(true); // Default to fast mode for batch
   const [targetProducts, setTargetProductsState] = useState(100);
+  const [poolStats, setPoolStats] = useState<{ total: number; idle: number; busy: number } | null>(null);
+  const [_httpScraperAvailable, _setHttpScraperAvailable] = useState(false); // Reserved for future HTTP-first implementation
   const [configs, setConfigs] = useState<Map<string, Config>>(new Map());
   const [missingConfigs, setMissingConfigs] = useState<string[]>([]);
   const [expandedSlotId, setExpandedSlotId] = useState<number | null>(null);
@@ -99,6 +100,12 @@ export function BatchProvider({ children }: BatchProviderProps) {
   const isRunningRef = useRef(false); // Track running state for immediate access in callbacks
   const isPausedRef = useRef(false); // Track paused state for immediate access in callbacks
   const configsRef = useRef<Map<string, Config>>(new Map()); // Track configs for immediate access
+
+  // New batch processing refs
+  const domainSchedulerRef = useRef(new DomainScheduler());
+  const batchWsRef = useRef<WebSocket | null>(null); // Single WebSocket for batch control
+  const slotBrowserIdRef = useRef<Map<number, string>>(new Map()); // slot -> browserId mapping
+  const httpScraperAvailableRef = useRef(false); // Track HTTP scraper availability (always false now)
 
   // Process uploaded CSV
   const processCSV = useCallback(async (file: File) => {
@@ -126,6 +133,9 @@ export function BatchProvider({ children }: BatchProviderProps) {
 
     setJobs(newJobs);
     jobQueueRef.current = [...newJobs];
+
+    // Initialize domain scheduler for grouped processing
+    domainSchedulerRef.current.initialize(newJobs);
 
     // Update progress
     setProgress({
@@ -273,7 +283,7 @@ export function BatchProvider({ children }: BatchProviderProps) {
     await checkConfigs(domainCountryPairs, jobs);
   }, [jobs]);
 
-  // Start batch processing
+  // Start batch processing with new pool-based system
   const startBatch = useCallback(() => {
     if (jobs.length === 0) return;
 
@@ -288,6 +298,13 @@ export function BatchProvider({ children }: BatchProviderProps) {
     socketsRef.current.clear();
     slotSessionsRef.current.clear();
     slotJobsRef.current.clear();
+    slotBrowserIdRef.current.clear();
+
+    // Close existing batch WebSocket
+    if (batchWsRef.current) {
+      batchWsRef.current.close();
+      batchWsRef.current = null;
+    }
 
     // Set refs BEFORE state (refs are synchronous, state is async)
     isRunningRef.current = true;
@@ -309,18 +326,341 @@ export function BatchProvider({ children }: BatchProviderProps) {
     // Reset job statuses to pending
     setJobs(prev => prev.map(j => ({ ...j, status: 'pending' as const, itemCount: 0, results: undefined, error: undefined })));
 
-    // Reset job queue with fresh jobs
-    jobQueueRef.current = [...jobs.map(j => ({ ...j, status: 'pending' as const }))];
+    // Reset job queue and domain scheduler with fresh jobs
+    const freshJobs = jobs.map(j => ({ ...j, status: 'pending' as const }));
+    jobQueueRef.current = [...freshJobs];
+    domainSchedulerRef.current.initialize(freshJobs);
     console.log(`[BatchContext] Starting batch with ${jobQueueRef.current.length} jobs`);
 
-    // Initialize WebSocket connections for each slot
-    // Jobs will start processing when session:created is received for each slot
-    for (let i = 0; i < NUM_BROWSER_SLOTS; i++) {
-      initSlotConnection(i);
-    }
+    // Initialize batch WebSocket for pool-based processing
+    initBatchConnection();
   }, [jobs]);
 
-  const initSlotConnection = (slotId: number) => {
+  // Initialize batch control WebSocket (new pool-based system)
+  const initBatchConnection = () => {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+    batchWsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log('[BatchContext] Batch WebSocket connected, starting pool...');
+
+      // Extract unique domains from jobs for browser pre-navigation
+      const uniqueDomains = [...new Set(jobs.map(j => j.domain).filter(Boolean))];
+      console.log(`[BatchContext] Sending ${uniqueDomains.length} unique domains for browser warmup`);
+
+      // Request browser pool warmup with domains for pre-navigation
+      ws.send(JSON.stringify({
+        type: 'batch:start',
+        payload: {
+          warmupCount: DEFAULT_WARMUP_COUNT,
+          maxSlots: MAX_BROWSER_SLOTS,
+          domains: uniqueDomains, // Send domains for browser pre-navigation
+        },
+      }));
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      handleBatchMessage(msg);
+    };
+
+    ws.onclose = () => {
+      console.log('[BatchContext] Batch WebSocket disconnected');
+      batchWsRef.current = null;
+    };
+
+    ws.onerror = (err) => {
+      console.error('[BatchContext] Batch WebSocket error:', err);
+    };
+  };
+
+  // Handle messages from batch control WebSocket
+  const handleBatchMessage = (msg: { type: string; payload?: unknown }) => {
+    const payload = msg.payload as Record<string, unknown> || {};
+
+    switch (msg.type) {
+      case 'batch:poolReady': {
+        const {
+          poolSize,
+          configsCached = 0,
+          warmupTimeMs = 0,
+        } = payload as {
+          poolSize: number;
+          configsCached?: number;
+          warmupTimeMs?: number;
+        };
+        console.log(`[BatchContext] Pool ready in ${warmupTimeMs}ms: ${poolSize} browsers, ${configsCached} configs cached`);
+        setPoolStats({ total: poolSize, idle: poolSize, busy: 0 });
+        _setHttpScraperAvailable(false); // Browser-only mode
+        httpScraperAvailableRef.current = false;
+
+        // Initialize browser slots display
+        setBrowserSlots(
+          Array.from({ length: poolSize }, (_, i) => ({
+            id: i,
+            status: 'idle',
+          }))
+        );
+
+        // Start browser-only processing - request browsers for all slots
+        console.log('[BatchContext] Starting browser-only batch processing...');
+        const initialSlots = Math.min(poolSize, domainSchedulerRef.current.getRemainingCount());
+        for (let i = 0; i < initialSlots; i++) {
+          requestBrowserForSlot(i);
+        }
+        break;
+      }
+
+      case 'batch:browserAcquired': {
+        const { slotId, browserId } = payload as { slotId: number; browserId: string };
+        console.log(`[BatchContext] Slot ${slotId} acquired browser ${browserId.substring(0, 8)}`);
+        slotBrowserIdRef.current.set(slotId, browserId);
+        processJobWithBrowser(slotId, browserId);
+        break;
+      }
+
+      case 'batch:browserUnavailable': {
+        const { slotId } = payload as { slotId: number };
+        console.log(`[BatchContext] No browser available for slot ${slotId}, will retry...`);
+        // Retry after a short delay
+        setTimeout(() => {
+          if (isRunningRef.current && !isPausedRef.current) {
+            requestBrowserForSlot(slotId);
+          }
+        }, 1000);
+        break;
+      }
+
+      case 'batch:scrapeResult': {
+        const { browserId, success, items, count, error } = payload as {
+          browserId: string;
+          success: boolean;
+          items: unknown[];
+          count: number;
+          error?: string;
+        };
+
+        // Find which slot this browser belongs to
+        let slotId = -1;
+        for (const [sid, bid] of slotBrowserIdRef.current.entries()) {
+          if (bid === browserId) {
+            slotId = sid;
+            break;
+          }
+        }
+
+        if (slotId === -1) {
+          console.warn(`[BatchContext] Unknown browser ${browserId}`);
+          return;
+        }
+
+        const completedJob = slotJobsRef.current.get(slotId);
+        if (completedJob) {
+          handleJobComplete(slotId, browserId, completedJob, success, items as unknown[], count, error);
+        }
+        break;
+      }
+
+      case 'batch:poolStats': {
+        const { pool } = payload as { pool: { total: number; idle: number; busy: number } };
+        setPoolStats(pool);
+        break;
+      }
+
+      case 'batch:stopped': {
+        console.log('[BatchContext] Batch stopped');
+        setPoolStats(null);
+        break;
+      }
+
+      case 'batch:error': {
+        const { error } = payload as { error: string };
+        console.error('[BatchContext] Batch error:', error);
+        break;
+      }
+    }
+  };
+
+  // Request a browser from the pool for a slot
+  const requestBrowserForSlot = (slotId: number) => {
+    if (!batchWsRef.current || batchWsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!isRunningRef.current || isPausedRef.current) return;
+
+    // Get preferred domain from scheduler
+    const nextJob = domainSchedulerRef.current.getNextJob(slotId);
+    if (!nextJob) {
+      console.log(`[BatchContext] No more jobs for slot ${slotId}`);
+      checkBatchComplete();
+      return;
+    }
+
+    // Put the job back temporarily (we'll get it again when browser is acquired)
+    domainSchedulerRef.current.requeueJob(nextJob, true);
+
+    setBrowserSlots(prev => prev.map(s =>
+      s.id === slotId ? { ...s, status: 'loading' } : s
+    ));
+
+    batchWsRef.current.send(JSON.stringify({
+      type: 'batch:acquireBrowser',
+      payload: {
+        slotId,
+        preferredDomain: nextJob.domain,
+      },
+    }));
+  };
+
+  // Process a job using an acquired browser
+  const processJobWithBrowser = (slotId: number, browserId: string) => {
+    if (!batchWsRef.current || batchWsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!isRunningRef.current || isPausedRef.current) return;
+
+    // Get next job from domain scheduler
+    const job = domainSchedulerRef.current.getNextJob(slotId);
+    if (!job) {
+      // No more jobs, release browser
+      batchWsRef.current.send(JSON.stringify({
+        type: 'batch:releaseBrowser',
+        payload: { browserId },
+      }));
+      slotBrowserIdRef.current.delete(slotId);
+      checkBatchComplete();
+      return;
+    }
+
+    // Track job assignment
+    slotJobsRef.current.set(slotId, job);
+
+    // Update job status
+    setJobs(prev => prev.map(j =>
+      j.index === job.index ? { ...j, status: 'running' as const, startedAt: Date.now() } : j
+    ));
+
+    setBrowserSlots(prev => prev.map(s =>
+      s.id === slotId ? { ...s, status: 'scraping', currentJob: job, currentUrl: job.sourceUrl } : s
+    ));
+
+    // Update progress
+    setProgress(prev => ({
+      ...prev,
+      pending: prev.pending - 1,
+      running: prev.running + 1,
+    }));
+
+    // Find config for this job
+    const configKey = `${job.domain}:${job.country}`;
+    const config = configsRef.current.get(configKey) || configsRef.current.get(job.domain);
+
+    if (!config) {
+      console.error(`[BatchContext] No config for ${configKey}`);
+      handleJobComplete(slotId, browserId, job, false, [], 0, 'No config found');
+      return;
+    }
+
+    // Update queue depth for auto-scaler
+    const remaining = domainSchedulerRef.current.getRemainingCount();
+    batchWsRef.current.send(JSON.stringify({
+      type: 'batch:updateQueueDepth',
+      payload: { depth: remaining },
+    }));
+
+    // Execute browser scrape
+    batchWsRef.current.send(JSON.stringify({
+      type: 'batch:browserScrape',
+      payload: {
+        browserId,
+        configName: config.name,
+        url: job.sourceUrl,
+        fastMode: true, // Always fast mode in batch
+        targetProducts: targetProducts,
+      },
+    }));
+  };
+
+  // Handle job completion
+  const handleJobComplete = (
+    slotId: number,
+    browserId: string,
+    job: BatchJob,
+    success: boolean,
+    items: unknown[],
+    count: number,
+    error?: string
+  ) => {
+    const currentRetryCount = job.retryCount || 0;
+    console.log(`[BatchContext] Job ${job.index} complete: ${count} items, success: ${success}`);
+
+    // Check if we need to retry
+    if (count < MIN_ITEMS_FOR_SUCCESS && currentRetryCount < MAX_RETRIES && !error) {
+      console.log(`[BatchContext] Job ${job.index} needs retry (${count} < ${MIN_ITEMS_FOR_SUCCESS})`);
+
+      // Re-queue for retry
+      const retryJob = { ...job, retryCount: currentRetryCount + 1 };
+      domainSchedulerRef.current.requeueJob(retryJob, true);
+
+      slotJobsRef.current.delete(slotId);
+
+      // Continue with next job
+      setTimeout(() => processJobWithBrowser(slotId, browserId), 500);
+      return;
+    }
+
+    // Mark job complete
+    const finalStatus = success && count > 0 ? 'completed' : 'error';
+
+    setJobs(prev => prev.map(j =>
+      j.index === job.index ? {
+        ...j,
+        status: finalStatus as 'completed' | 'error',
+        itemCount: count,
+        results: items,
+        error: error,
+        completedAt: Date.now(),
+      } : j
+    ));
+
+    // Update progress
+    setProgress(prev => ({
+      ...prev,
+      running: prev.running - 1,
+      completed: finalStatus === 'completed' ? prev.completed + 1 : prev.completed,
+      errors: finalStatus === 'error' ? prev.errors + 1 : prev.errors,
+      itemsScraped: prev.itemsScraped + count,
+    }));
+
+    // Mark completed in scheduler
+    domainSchedulerRef.current.markCompleted(slotId, true);
+    slotJobsRef.current.delete(slotId);
+
+    setBrowserSlots(prev => prev.map(s =>
+      s.id === slotId ? { ...s, status: 'idle', currentJob: undefined } : s
+    ));
+
+    // Continue with next job
+    processJobWithBrowser(slotId, browserId);
+  };
+
+  // Check if batch is complete
+  const checkBatchComplete = () => {
+    const remaining = domainSchedulerRef.current.getRemainingCount();
+    const runningJobs = slotJobsRef.current.size;
+
+    if (remaining === 0 && runningJobs === 0) {
+      console.log('[BatchContext] Batch complete!');
+      isRunningRef.current = false;
+      setIsRunning(false);
+
+      // Stop the batch pool
+      if (batchWsRef.current && batchWsRef.current.readyState === WebSocket.OPEN) {
+        batchWsRef.current.send(JSON.stringify({ type: 'batch:stop' }));
+      }
+    }
+  };
+
+  // Legacy slot connection - kept for reference, now using pool-based system
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _initSlotConnection = (slotId: number) => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
 
@@ -533,7 +873,9 @@ export function BatchProvider({ children }: BatchProviderProps) {
   };
 
   const processNextJobs = () => {
-    for (let i = 0; i < NUM_BROWSER_SLOTS; i++) {
+    // Process jobs for all active slots
+    const slotCount = poolStats?.total || browserSlots.length || DEFAULT_WARMUP_COUNT;
+    for (let i = 0; i < slotCount; i++) {
       processNextJob(i);
     }
   };
@@ -678,7 +1020,14 @@ export function BatchProvider({ children }: BatchProviderProps) {
     setIsRunning(false);
     setIsPaused(false);
 
-    // Send session:destroy to each slot before closing
+    // Stop batch pool via WebSocket
+    if (batchWsRef.current && batchWsRef.current.readyState === WebSocket.OPEN) {
+      batchWsRef.current.send(JSON.stringify({ type: 'batch:stop' }));
+      batchWsRef.current.close();
+    }
+    batchWsRef.current = null;
+
+    // Send session:destroy to each slot before closing (legacy cleanup)
     for (const [slotId, ws] of socketsRef.current.entries()) {
       const sessionId = slotSessionsRef.current.get(slotId);
       if (sessionId && ws.readyState === WebSocket.OPEN) {
@@ -692,15 +1041,15 @@ export function BatchProvider({ children }: BatchProviderProps) {
     socketsRef.current.clear();
     slotSessionsRef.current.clear();
     slotJobsRef.current.clear();
+    slotBrowserIdRef.current.clear();
 
-    // Clear job queue
+    // Clear job queue and scheduler
     jobQueueRef.current = [];
+    domainSchedulerRef.current.reset();
 
     // Reset slots
-    setBrowserSlots(Array.from({ length: NUM_BROWSER_SLOTS }, (_, i) => ({
-      id: i,
-      status: 'idle',
-    })));
+    setBrowserSlots([]);
+    setPoolStats(null);
   }, []);
 
   const setFastMode = useCallback((enabled: boolean) => {

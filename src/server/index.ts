@@ -26,6 +26,10 @@ import { ScrollTestHandler } from './scraper/ScrollTestHandler.js';
 import { PopupHandler } from './scraper/PopupHandler.js';
 import { NetworkInterceptor, type NetworkInterceptorConfig } from './scraper/handlers/NetworkInterceptor.js';
 import { getGeminiService } from './ai/GeminiService.js';
+import { BrowserPool } from './browser/BrowserPool.js';
+import { AutoScaler } from './browser/AutoScaler.js';
+import { getConfigCache, resetConfigCache } from './config/ConfigCache.js';
+import type { Page, CDPSession } from 'playwright';
 
 import type {
   WSMessage,
@@ -36,6 +40,7 @@ import type {
   ScraperConfig,
   Config,
   AdvancedScraperConfig,
+  ScrapeResult,
 } from '../shared/types.js';
 
 const PORT = parseInt(process.env.PORT || '3002', 10);
@@ -65,6 +70,14 @@ interface ActiveSession {
 
 const sessions = new Map<string, ActiveSession>();
 const browserManager = new BrowserManager();
+
+// ============================================================================
+// BATCH PROCESSING STATE
+// ============================================================================
+
+let batchPool: BrowserPool | null = null;
+let batchAutoScaler: AutoScaler | null = null;
+const batchBrowserJobs = new Map<string, { slotId: number; domain: string }>();
 
 // ============================================================================
 // EXPRESS SERVER
@@ -299,6 +312,174 @@ wss.on('connection', (ws) => {
     console.error('[Server] WebSocket error:', error);
   });
 });
+
+// ============================================================================
+// SHARED SCRAPING FUNCTION (used by both single scraper and batch mode)
+// ============================================================================
+
+/**
+ * Execute scraping with a config - shared logic for single scraper page and batch mode.
+ * This ensures both modes use identical config loading, selector conversion, and execution.
+ */
+async function executeScraperWithConfig(
+  page: Page,
+  cdp: CDPSession,
+  configName: string,
+  startUrl: string,
+  targetProducts: number
+): Promise<ScrapeResult> {
+  // Load the saved config from disk
+  const configPath = path.join(CONFIGS_DIR, `${configName}.json`);
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`Config "${configName}" not found`);
+  }
+
+  const savedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  console.log(`[executeScraperWithConfig] Loaded config from: ${configPath}`);
+
+  // Convert saved config format (Config type) to ScraperConfig format
+  // Saved configs have selectors as: { Title?: string | string[], Price?: string | string[], ... }
+  // ScrapingEngine expects: selectors: AssignedSelector[]
+  const convertedSelectors: ScraperConfig['selectors'] = [];
+
+  if (savedConfig.selectors && typeof savedConfig.selectors === 'object') {
+    // Map field names to selector roles
+    const fieldToRole: Record<string, string> = {
+      'Title': 'title',
+      'Price': 'price',
+      'OriginalPrice': 'originalPrice',
+      'SalePrice': 'salePrice',
+      'URL': 'url',
+      'Image': 'image',
+    };
+
+    for (const [field, selectorValue] of Object.entries(savedConfig.selectors)) {
+      if (!selectorValue) continue;
+
+      const role = fieldToRole[field] || field.toLowerCase();
+      const selectorStrings = Array.isArray(selectorValue) ? selectorValue : [selectorValue];
+
+      // Add each selector string as an AssignedSelector
+      selectorStrings.forEach((css: string, index: number) => {
+        if (typeof css === 'string' && css.trim()) {
+          convertedSelectors.push({
+            role: role as 'title' | 'price' | 'url' | 'image' | 'originalPrice' | 'salePrice',
+            selector: {
+              css: css.trim(),
+              xpath: '',
+              attributes: {},
+              tagName: '',
+              boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+            },
+            extractionType: role === 'url' ? 'href' : role === 'image' ? 'src' : 'text',
+            priority: index, // First selector has priority 0 (highest)
+          });
+        }
+      });
+    }
+  }
+
+  // Build advanced config from lazyLoad settings if present
+  const typedSavedConfig = savedConfig as Config;
+  let advancedConfig: AdvancedScraperConfig | undefined;
+  if (typedSavedConfig.lazyLoad) {
+    advancedConfig = {
+      scrollStrategy: typedSavedConfig.lazyLoad.scrollStrategy,
+      scrollDelay: typedSavedConfig.lazyLoad.scrollDelay,
+      maxScrollIterations: typedSavedConfig.lazyLoad.maxScrollIterations,
+      stabilityTimeout: typedSavedConfig.lazyLoad.stabilityTimeout,
+      rapidScrollStep: typedSavedConfig.lazyLoad.rapidScrollStep,
+      rapidScrollDelay: typedSavedConfig.lazyLoad.rapidScrollDelay,
+      loadingIndicators: typedSavedConfig.lazyLoad.loadingIndicators,
+    };
+    console.log(`[executeScraperWithConfig] Applied lazyLoad settings: ${JSON.stringify(advancedConfig)}`);
+  }
+
+  // NOTE: preActions/dismiss_actions are NOT used - PopupHandler handles popups automatically
+  // This is more reliable and faster than manual pre-action clicks
+
+  // Build pagination config based on saved pagination data
+  let paginationConfig: ScraperConfig['pagination'] | undefined;
+  let scrollPositions: number[] | undefined;
+
+  if (savedConfig.pagination) {
+    const paginationType = savedConfig.pagination.type;
+    // For infinite_scroll, we don't need a selector - just enable auto-scroll
+    if (paginationType === 'infinite_scroll') {
+      // Infinite scroll is handled by autoScroll
+      // If we have recorded scroll positions, use them
+      if (savedConfig.pagination.scrollPositions && savedConfig.pagination.scrollPositions.length > 0) {
+        scrollPositions = savedConfig.pagination.scrollPositions as number[];
+        console.log(`[executeScraperWithConfig] Pagination type: infinite_scroll with ${scrollPositions!.length} recorded scroll positions`);
+      } else {
+        console.log(`[executeScraperWithConfig] Pagination type: infinite_scroll - using auto-scroll`);
+      }
+    } else if (paginationType === 'next_page' || paginationType === 'url_pattern') {
+      paginationConfig = {
+        enabled: true,
+        type: paginationType,
+        selector: savedConfig.pagination.selector || '',
+        pattern: savedConfig.pagination.pattern,
+        offset: savedConfig.pagination.offset,
+        maxPages: savedConfig.pagination.max_pages || 10,
+        waitAfterClick: 1000,
+      };
+      console.log(`[executeScraperWithConfig] Pagination type: ${paginationType}, selector: ${paginationConfig.selector || 'N/A'}`);
+      if (paginationConfig.offset) {
+        console.log(`[executeScraperWithConfig] Offset config: key=${paginationConfig.offset.key}, start=${paginationConfig.offset.start}, increment=${paginationConfig.offset.increment}`);
+      }
+    }
+  }
+
+  // Add scroll positions to advanced config if available
+  if (scrollPositions && advancedConfig) {
+    (advancedConfig as AdvancedScraperConfig & { scrollPositions?: number[] }).scrollPositions = scrollPositions;
+  } else if (scrollPositions) {
+    advancedConfig = { scrollPositions } as AdvancedScraperConfig & { scrollPositions: number[] };
+  }
+
+  // Build the final ScraperConfig
+  let config: ScraperConfig;
+
+  // If the saved config already has selectors in the correct format (AssignedSelector[]), use them
+  if (Array.isArray(savedConfig.selectors)) {
+    config = {
+      ...savedConfig,
+      name: configName,
+      startUrl: startUrl,
+      selectors: savedConfig.selectors,
+      // preActions removed - PopupHandler handles popups automatically
+      pagination: paginationConfig,
+      itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
+      targetProducts: targetProducts || typedSavedConfig.targetItems || 0,
+      advanced: advancedConfig,
+    };
+  } else {
+    config = {
+      name: configName,
+      startUrl: startUrl,
+      selectors: convertedSelectors,
+      // preActions removed - PopupHandler handles popups automatically
+      pagination: paginationConfig,
+      itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
+      autoScroll: savedConfig.autoScroll !== false,
+      targetProducts: targetProducts || typedSavedConfig.targetItems || 0,
+      advanced: advancedConfig,
+    };
+  }
+
+  console.log(`[executeScraperWithConfig] Final startUrl: ${config.startUrl}`);
+  console.log(`[executeScraperWithConfig] Target products: ${config.targetProducts || 'unlimited'}`);
+  console.log(`[executeScraperWithConfig] Config selectors count: ${config.selectors?.length || 0}`);
+  console.log(`[executeScraperWithConfig] Item container: ${config.itemContainer || 'none'}`);
+
+  // Create scraper and execute
+  const scraper = new ScrapingEngine(page, cdp);
+  const result = await scraper.execute(config);
+  console.log(`[executeScraperWithConfig] Scrape complete: ${result.items?.length || 0} items`);
+
+  return result;
+}
 
 // ============================================================================
 // MESSAGE HANDLERS
@@ -1661,6 +1842,244 @@ async function handleMessage(
       console.log(`[Server] Returning ${products.length} captured products`);
 
       send(ws, 'network:products', { products }, session.id);
+      break;
+    }
+
+    // =========================================================================
+    // BATCH PROCESSING - Browser Pool & HTTP-First Scraping
+    // =========================================================================
+
+    case 'batch:start': {
+      const { warmupCount = 10, maxSlots = 10, domains = [] } = payload as {
+        warmupCount?: number;
+        maxSlots?: number;
+        domains?: string[];
+      };
+
+      console.log(`[Server] Starting batch with warmupCount=${warmupCount}, maxSlots=${maxSlots}, domains=${domains.length}`);
+
+      try {
+        const startTime = Date.now();
+
+        // Create pool if not exists
+        if (!batchPool) {
+          batchPool = new BrowserPool({ maxSize: maxSlots, warmupCount });
+        }
+
+        // Create auto-scaler
+        if (!batchAutoScaler) {
+          batchAutoScaler = new AutoScaler(batchPool);
+        }
+
+        // Run warmup tasks in PARALLEL for faster startup
+        const configCache = getConfigCache();
+
+        const [configResult, browserWarmupResult] = await Promise.all([
+          // 1. Pre-load all configs into memory cache
+          configCache.preload().then((result) => {
+            console.log(`[Server] Config cache ready: ${result.loaded} configs`);
+            return result;
+          }).catch((err) => {
+            console.error('[Server] Config cache preload failed:', err);
+            return { loaded: 0, errors: [err.message] };
+          }),
+
+          // 2. Warm up browser pool (with domain pre-navigation if domains provided)
+          (domains.length > 0
+            ? batchPool.warmupWithDomains?.(domains, warmupCount) || batchPool.warmup(warmupCount)
+            : batchPool.warmup(warmupCount)
+          ).then(() => {
+            const stats = batchPool!.getStats();
+            console.log(`[Server] Browser pool ready: ${stats.total} browsers`);
+            return stats;
+          }).catch((err) => {
+            console.error('[Server] Browser warmup failed:', err);
+            return { total: 0, idle: 0, busy: 0, unhealthy: 0 };
+          }),
+        ]);
+
+        batchAutoScaler.start();
+
+        const totalTime = Date.now() - startTime;
+        const browserStats = browserWarmupResult as { total: number; idle: number; busy: number; unhealthy: number };
+
+        send(ws, 'batch:poolReady', {
+          poolSize: browserStats.total,
+          idleBrowsers: browserStats.idle,
+          httpScraperAvailable: false, // HTTP scraper removed - browser only
+          configsCached: configResult.loaded,
+          warmupTimeMs: totalTime,
+        }, sessionId);
+
+        console.log(`[Server] Batch pool ready in ${totalTime}ms: ${browserStats.total} browsers, ${configResult.loaded} configs cached`);
+      } catch (error) {
+        console.error('[Server] Batch start failed:', error);
+        sendError(ws, 'batch:error', error instanceof Error ? error.message : 'Batch start failed');
+      }
+      break;
+    }
+
+    case 'batch:stop': {
+      console.log('[Server] Stopping batch...');
+
+      try {
+        // Stop the auto-scaler first so no new browsers are created
+        if (batchAutoScaler) {
+          batchAutoScaler.stop();
+          batchAutoScaler = null;
+        }
+
+        // Shutdown browser pool and clear config cache
+        await Promise.all([
+          // Browser pool (wait for busy browsers with timeout)
+          batchPool?.shutdown(true).finally(() => {
+            batchPool = null;
+          }),
+          // Config cache (just clear memory)
+          Promise.resolve(resetConfigCache()),
+        ]);
+
+        batchBrowserJobs.clear();
+
+        send(ws, 'batch:stopped', {}, sessionId);
+        console.log('[Server] Batch stopped');
+      } catch (error) {
+        console.error('[Server] Batch stop failed:', error);
+        sendError(ws, 'batch:error', error instanceof Error ? error.message : 'Batch stop failed');
+      }
+      break;
+    }
+
+    case 'batch:acquireBrowser': {
+      const { slotId, preferredDomain } = payload as { slotId: number; preferredDomain?: string };
+
+      if (!batchPool) {
+        send(ws, 'batch:error', { error: 'Pool not initialized' }, sessionId);
+        break;
+      }
+
+      try {
+        const browser = await batchPool.acquire(preferredDomain);
+
+        if (!browser) {
+          send(ws, 'batch:browserUnavailable', { slotId }, sessionId);
+          break;
+        }
+
+        // Track the browser assignment
+        batchBrowserJobs.set(browser.id, { slotId, domain: preferredDomain || '' });
+
+        send(ws, 'batch:browserAcquired', {
+          slotId,
+          browserId: browser.id,
+        }, sessionId);
+      } catch (error) {
+        console.error('[Server] Browser acquire failed:', error);
+        send(ws, 'batch:browserUnavailable', { slotId, error: (error as Error).message }, sessionId);
+      }
+      break;
+    }
+
+    case 'batch:releaseBrowser': {
+      const { browserId } = payload as { browserId: string };
+
+      if (batchPool) {
+        batchPool.release(browserId);
+        batchBrowserJobs.delete(browserId);
+      }
+      break;
+    }
+
+    case 'batch:updateQueueDepth': {
+      const { depth } = payload as { depth: number };
+
+      if (batchAutoScaler) {
+        batchAutoScaler.setQueueDepth(depth);
+      }
+      break;
+    }
+
+    case 'batch:browserScrape': {
+      // Browser-based scraping - uses SAME logic as single scraper page
+      const { browserId, configName, url, targetProducts = 100 } = payload as {
+        browserId: string;
+        configName: string;
+        url: string;
+        targetProducts?: number;
+      };
+
+      if (!batchPool || batchPool.isShutdown()) {
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: false,
+          error: 'Pool not initialized or shutting down',
+          items: [],
+        }, sessionId);
+        break;
+      }
+
+      const browser = batchPool.get(browserId);
+      if (!browser) {
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: false,
+          error: 'Browser not found',
+          items: [],
+        }, sessionId);
+        break;
+      }
+
+      try {
+        console.log(`[Server] batch:browserScrape starting for ${url} with config ${configName}`);
+
+        // Navigate to URL first (45s timeout for heavy sites like IKEA)
+        await browser.page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 45000
+        });
+
+        // Use the SAME scraping logic as the single scraper page
+        const result = await executeScraperWithConfig(
+          browser.page,
+          browser.cdp,
+          configName,
+          url,
+          targetProducts
+        );
+
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: result.success,
+          items: result.items,
+          count: result.items.length,
+          error: result.errors?.[0],
+        }, sessionId);
+
+      } catch (error) {
+        console.error(`[Server] Browser scrape failed for ${url}:`, error);
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: false,
+          error: error instanceof Error ? error.message : 'Scrape failed',
+          items: [],
+        }, sessionId);
+      }
+      break;
+    }
+
+    case 'batch:getPoolStats': {
+      if (!batchPool) {
+        send(ws, 'batch:poolStats', { error: 'Pool not initialized' }, sessionId);
+        break;
+      }
+
+      const stats = batchPool.getStats();
+      const scalerStatus = batchAutoScaler?.getStatus();
+
+      send(ws, 'batch:poolStats', {
+        pool: stats,
+        scaler: scalerStatus,
+      }, sessionId);
       break;
     }
 

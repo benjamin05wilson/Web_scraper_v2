@@ -19,7 +19,7 @@
   "itemContainer": "div.plp-fragment-wrapper.plp-fragment-wrapper--grid",
   "dismiss_actions": [
     {
-      "selector": "[class*=\"banner\"] text=\"Accept all cookies\"",
+      "selector": "button:has-text(\"Accept all cookies\")",
       "text": "Accept all cookies"
     },
     {
