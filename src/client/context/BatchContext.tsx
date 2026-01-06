@@ -627,13 +627,6 @@ export function BatchProvider({ children }: BatchProviderProps) {
       return;
     }
 
-    // Update queue depth for auto-scaler
-    const remaining = domainSchedulerRef.current.getRemainingCount();
-    batchWsRef.current.send(JSON.stringify({
-      type: 'batch:updateQueueDepth',
-      payload: { depth: remaining },
-    }));
-
     // Execute browser scrape
     batchWsRef.current.send(JSON.stringify({
       type: 'batch:browserScrape',

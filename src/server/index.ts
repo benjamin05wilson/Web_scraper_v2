@@ -27,7 +27,6 @@ import { PopupHandler } from './scraper/PopupHandler.js';
 import { NetworkInterceptor, type NetworkInterceptorConfig } from './scraper/handlers/NetworkInterceptor.js';
 import { getGeminiService } from './ai/GeminiService.js';
 import { BrowserPool } from './browser/BrowserPool.js';
-import { AutoScaler } from './browser/AutoScaler.js';
 import { getConfigCache, resetConfigCache } from './config/ConfigCache.js';
 import type { Page, CDPSession } from 'playwright';
 
@@ -76,7 +75,6 @@ const browserManager = new BrowserManager();
 // ============================================================================
 
 let batchPool: BrowserPool | null = null;
-let batchAutoScaler: AutoScaler | null = null;
 const batchBrowserJobs = new Map<string, { slotId: number; domain: string }>();
 
 // ============================================================================
@@ -1866,11 +1864,6 @@ async function handleMessage(
           batchPool = new BrowserPool({ maxSize: maxSlots, warmupCount });
         }
 
-        // Create auto-scaler
-        if (!batchAutoScaler) {
-          batchAutoScaler = new AutoScaler(batchPool);
-        }
-
         // Run warmup tasks in PARALLEL for faster startup
         const configCache = getConfigCache();
 
@@ -1898,8 +1891,6 @@ async function handleMessage(
           }),
         ]);
 
-        batchAutoScaler.start();
-
         const totalTime = Date.now() - startTime;
         const browserStats = browserWarmupResult as { total: number; idle: number; busy: number; unhealthy: number };
 
@@ -1923,12 +1914,6 @@ async function handleMessage(
       console.log('[Server] Stopping batch...');
 
       try {
-        // Stop the auto-scaler first so no new browsers are created
-        if (batchAutoScaler) {
-          batchAutoScaler.stop();
-          batchAutoScaler = null;
-        }
-
         // Shutdown browser pool and clear config cache
         await Promise.all([
           // Browser pool (wait for busy browsers with timeout)
@@ -1991,11 +1976,7 @@ async function handleMessage(
     }
 
     case 'batch:updateQueueDepth': {
-      const { depth } = payload as { depth: number };
-
-      if (batchAutoScaler) {
-        batchAutoScaler.setQueueDepth(depth);
-      }
+      // Queue depth tracking (autoscaler removed)
       break;
     }
 
@@ -2079,11 +2060,9 @@ async function handleMessage(
       }
 
       const stats = batchPool.getStats();
-      const scalerStatus = batchAutoScaler?.getStatus();
 
       send(ws, 'batch:poolStats', {
         pool: stats,
-        scaler: scalerStatus,
       }, sessionId);
       break;
     }
