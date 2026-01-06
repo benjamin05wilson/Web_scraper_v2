@@ -42,6 +42,7 @@ export interface SignalBreakdown {
   hasImage: boolean;
   imageCount: number;
   hasPricePattern: boolean;
+  priceCount?: number;            // Number of price patterns found (2+ = RRP + sale)
   hasProductLink: boolean;
   hasTitle: boolean;              // h1-h6 or link with text
   textLength: number;

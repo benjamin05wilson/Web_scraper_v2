@@ -7,9 +7,10 @@ interface ExpandedBrowserModalProps {
   onClose: () => void;
   slot: BrowserSlot | null;
   onInput: (type: string, data: unknown) => void;
+  onCaptchaSolved?: (slotId: number) => void;
 }
 
-export function ExpandedBrowserModal({ isOpen, onClose, slot, onInput }: ExpandedBrowserModalProps) {
+export function ExpandedBrowserModal({ isOpen, onClose, slot, onInput, onCaptchaSolved }: ExpandedBrowserModalProps) {
   const imgRef = useRef<HTMLImageElement>(null);
 
   const handleClick = useCallback(
@@ -35,10 +36,57 @@ export function ExpandedBrowserModal({ isOpen, onClose, slot, onInput }: Expande
     [onInput]
   );
 
+  const handleCaptchaSolved = useCallback(() => {
+    if (slot && onCaptchaSolved) {
+      onCaptchaSolved(slot.id);
+    }
+  }, [slot, onCaptchaSolved]);
+
   if (!slot) return null;
+
+  const isCaptchaMode = slot.status === 'captcha';
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={`Tab ${slot.id + 1} - ${slot.currentJob?.domain || 'Idle'}`} size="large">
+      {/* Captcha banner */}
+      {isCaptchaMode && (
+        <div
+          style={{
+            padding: '15px 20px',
+            background: 'var(--accent-warning)',
+            color: 'white',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '15px',
+          }}
+        >
+          <div>
+            <strong style={{ display: 'block', marginBottom: '4px' }}>
+              CAPTCHA Detected ({slot.captchaChallengeType || 'unknown'})
+            </strong>
+            <span style={{ fontSize: '0.9em', opacity: 0.9 }}>
+              Please solve the challenge in the browser below, then click "Solved"
+            </span>
+          </div>
+          <button
+            onClick={handleCaptchaSolved}
+            style={{
+              background: 'white',
+              color: 'var(--accent-warning)',
+              border: 'none',
+              padding: '10px 24px',
+              borderRadius: '6px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Solved
+          </button>
+        </div>
+      )}
+
       <div
         style={{
           background: '#1a1a1a',
@@ -90,7 +138,9 @@ export function ExpandedBrowserModal({ isOpen, onClose, slot, onInput }: Expande
             </div>
             <div>
               <span style={{ color: 'var(--text-secondary)' }}>Status: </span>
-              <span>{slot.status}</span>
+              <span style={{ color: isCaptchaMode ? 'var(--accent-warning)' : undefined }}>
+                {isCaptchaMode ? 'CAPTCHA' : slot.status}
+              </span>
             </div>
           </div>
           {slot.currentUrl && (

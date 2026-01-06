@@ -16,6 +16,7 @@ import type {
   UrlHoverPayload,
   ExtractedContentItem,
   ContainerContentPayload,
+  CloudflareStatus,
 } from '../../shared/types';
 
 interface UseBrowserSessionOptions {
@@ -89,6 +90,12 @@ interface UseBrowserSessionReturn {
   // Auto-detect product
   autoDetectProduct: () => void;
   isAutoDetecting: boolean;
+
+  // Cloudflare bypass
+  cloudflareStatus: CloudflareStatus | null;
+  exportCloudflareCookies: () => void;
+  refreshCloudflareStatus: () => void;
+  isExportingCookies: boolean;
 }
 
 export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowserSessionReturn {
@@ -136,6 +143,10 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
 
   // Auto-detect state
   const [isAutoDetecting, setIsAutoDetecting] = useState(false);
+
+  // Cloudflare bypass state
+  const [cloudflareStatus, setCloudflareStatus] = useState<CloudflareStatus | null>(null);
+  const [isExportingCookies, setIsExportingCookies] = useState(false);
 
   // Track if subscriptions are ready
   const [subscriptionsReady, setSubscriptionsReady] = useState(false);
@@ -289,6 +300,50 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
           console.log('[Session] AI labeling failed:', msg.payload.error);
           setAiLabels([]);
         }
+      })
+    );
+
+    // Cloudflare cookies exported
+    unsubscribes.push(
+      subscribe('cloudflare:cookiesExported', (msg) => {
+        setIsExportingCookies(false);
+        if (msg.payload.success) {
+          console.log('[Session] Cloudflare cookies exported:', msg.payload.cookieCount, 'cookies for', msg.payload.domain);
+        } else {
+          console.log('[Session] Cloudflare cookie export failed:', msg.payload.error);
+        }
+      })
+    );
+
+    // Cloudflare status response
+    unsubscribes.push(
+      subscribe('cloudflare:status', (msg) => {
+        setCloudflareStatus(msg.payload as CloudflareStatus);
+        console.log('[Session] Cloudflare status:', msg.payload);
+      })
+    );
+
+    // Cloudflare challenge detected
+    unsubscribes.push(
+      subscribe('cloudflare:detected', (msg) => {
+        console.log('[Session] Cloudflare challenge detected:', msg.payload.challengeType);
+        setCloudflareStatus({
+          hasChallenge: true,
+          challengeType: msg.payload.challengeType,
+          hasClearance: false,
+        });
+      })
+    );
+
+    // Cloudflare challenge passed
+    unsubscribes.push(
+      subscribe('cloudflare:passed', () => {
+        console.log('[Session] Cloudflare challenge passed');
+        setCloudflareStatus({
+          hasChallenge: false,
+          challengeType: 'none',
+          hasClearance: true,
+        });
       })
     );
 
@@ -505,6 +560,19 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     send('dom:autoDetect', {}, sessionId);
   }, [sessionId, send]);
 
+  // Export Cloudflare cookies for current session
+  const exportCloudflareCookies = useCallback(() => {
+    if (!sessionId) return;
+    setIsExportingCookies(true);
+    send('cloudflare:exportCookies', {}, sessionId);
+  }, [sessionId, send]);
+
+  // Refresh Cloudflare status
+  const refreshCloudflareStatus = useCallback(() => {
+    if (!sessionId) return;
+    send('cloudflare:getStatus', {}, sessionId);
+  }, [sessionId, send]);
+
   return {
     sessionId,
     sessionStatus,
@@ -559,5 +627,10 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
 
     autoDetectProduct,
     isAutoDetecting,
+
+    cloudflareStatus,
+    exportCloudflareCookies,
+    refreshCloudflareStatus,
+    isExportingCookies,
   };
 }

@@ -337,8 +337,10 @@ export class ProductDetector {
           const textLength = text.length;
 
           // Price detection
-          const priceRegex = /[£$€¥₹]\\s*\\d+([,.]\\d{2,3})?|\\d+([,.]\\d{2,3})?\\s*[£$€¥₹MAD]/i;
-          const hasPricePattern = priceRegex.test(text) ||
+          const priceRegex = /[£$€¥₹]\\s*\\d+([,.]\\d{2,3})?|\\d+([,.]\\d{2,3})?\\s*[£$€¥₹MAD]/gi;
+          const priceMatches = text.match(priceRegex) || [];
+          const priceCount = priceMatches.length;
+          const hasPricePattern = priceCount > 0 ||
             el.querySelector('[class*="price"]') !== null;
 
           // Link detection
@@ -385,6 +387,7 @@ export class ProductDetector {
             hasImage,
             imageCount,
             hasPricePattern,
+            priceCount,  // Number of price matches (2+ suggests RRP + sale price)
             hasProductLink,
             hasTitle,
             textLength,
@@ -2072,6 +2075,459 @@ export class ProductDetector {
         inViewport: 0,
         issues: ['Validation failed'],
       }));
+    }
+  }
+
+  // ===========================================================================
+  // DIVERSE EXAMPLE FINDER - For field confirmation wizard
+  // ===========================================================================
+
+  /**
+   * Find diverse product examples for the field confirmation wizard.
+   * Returns cards with sale prices (2+ prices) AND cards without sale (1 price).
+   * This helps users verify their selectors work for both scenarios.
+   */
+  async findDiverseExamples(
+    containerSelector: string,
+    maxPerType: number = 2
+  ): Promise<{
+    withSale: Array<{
+      selector: string;
+      screenshot?: string;
+      fields: Array<{
+        field: 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'Image';
+        selector: string;
+        value: string;
+        bounds: { x: number; y: number; width: number; height: number };
+      }>;
+    }>;
+    withoutSale: Array<{
+      selector: string;
+      screenshot?: string;
+      fields: Array<{
+        field: 'Title' | 'RRP' | 'URL' | 'Image';
+        selector: string;
+        value: string;
+        bounds: { x: number; y: number; width: number; height: number };
+      }>;
+    }>;
+  }> {
+    console.log(`[ProductDetector] Finding diverse examples for: ${containerSelector}`);
+
+    const script = `
+      (function() {
+        const containerSelector = ${JSON.stringify(containerSelector)};
+        const maxPerType = ${maxPerType};
+        const containers = document.querySelectorAll(containerSelector);
+
+        console.log('[DiverseExamples] Found', containers.length, 'containers');
+
+        const withSale = [];
+        const withoutSale = [];
+
+        // Price pattern to detect currency values
+        // Use global version for .match() to count all prices
+        // Use non-global version for .test() to avoid lastIndex issues
+        const pricePatternGlobal = /[£$€¥₹]\\s*\\d+([,.]\\d{2,3})?|\\d+([,.]\\d{2,3})?\\s*[£$€¥MAD]/gi;
+        const pricePattern = /[£$€¥₹]\\s*\\d+([,.]\\d{2,3})?|\\d+([,.]\\d{2,3})?\\s*[£$€¥MAD]/i;
+
+        // Helper to get a unique selector for an element within its container
+        function getRelativeSelector(el, container) {
+          if (el === container) return ':self';
+
+          const tag = el.tagName.toLowerCase();
+
+          // Try classes
+          const classes = Array.from(el.classList)
+            .filter(c => !c.match(/^[0-9]|hover|active|focus|selected/i))
+            .slice(0, 2);
+
+          if (classes.length > 0) {
+            const classSelector = tag + '.' + classes.map(c => CSS.escape(c)).join('.');
+            // Verify it's unique within container
+            const matches = container.querySelectorAll(classSelector);
+            if (matches.length === 1) return classSelector;
+          }
+
+          // Try tag with nth-of-type
+          const siblings = container.querySelectorAll(tag);
+          if (siblings.length === 1) return tag;
+
+          const index = Array.from(siblings).indexOf(el);
+          return tag + ':nth-of-type(' + (index + 1) + ')';
+        }
+
+        // Helper to get nth-child selector for container
+        function getNthSelector(container, index) {
+          // Get the generic part of the container selector
+          const tag = container.tagName.toLowerCase();
+          const classes = Array.from(container.classList)
+            .filter(c => !c.match(/^[0-9]|hover|active|focus|selected/i))
+            .slice(0, 2);
+
+          if (classes.length > 0) {
+            return tag + '.' + classes.map(c => CSS.escape(c)).join('.') + ':nth-of-type(' + (index + 1) + ')';
+          }
+          return containerSelector + ':nth-of-type(' + (index + 1) + ')';
+        }
+
+        // Analyze each container
+        for (let i = 0; i < containers.length; i++) {
+          const container = containers[i];
+          const text = container.textContent || '';
+          const priceMatches = text.match(pricePatternGlobal) || [];
+          const priceCount = priceMatches.length;
+
+          // Skip if too few or too many prices (likely not a product)
+          if (priceCount === 0 || priceCount > 5) continue;
+
+          // Find elements for each field
+          const fields = [];
+          const rect = container.getBoundingClientRect();
+
+          // Title: heading or first significant text
+          const titleCandidates = container.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="name"]');
+          let titleEl = null;
+          for (const candidate of titleCandidates) {
+            const candidateText = (candidate.textContent || '').trim();
+            if (candidateText.length >= 5 && candidateText.length <= 200 && !pricePattern.test(candidateText)) {
+              titleEl = candidate;
+              break;
+            }
+          }
+          if (titleEl) {
+            const titleRect = titleEl.getBoundingClientRect();
+            fields.push({
+              field: 'Title',
+              selector: getRelativeSelector(titleEl, container),
+              value: (titleEl.textContent || '').trim().substring(0, 100),
+              bounds: { x: titleRect.x, y: titleRect.y, width: titleRect.width, height: titleRect.height },
+            });
+          }
+
+          // Prices: find elements containing price patterns
+          const allElements = container.querySelectorAll('*');
+          const priceElements = [];
+          for (const el of allElements) {
+            // Skip if this element contains other price elements (we want leaf nodes)
+            let hasChildPrice = false;
+            for (const child of el.querySelectorAll('*')) {
+              if (pricePattern.test(child.textContent || '')) {
+                hasChildPrice = true;
+                break;
+              }
+            }
+            if (hasChildPrice) continue;
+
+            const elText = (el.textContent || '').trim();
+            if (pricePattern.test(elText)) {
+              const numStr = elText.replace(/[^0-9.,]/g, '').replace(',', '.');
+              const num = parseFloat(numStr);
+              if (!isNaN(num)) {
+                const elRect = el.getBoundingClientRect();
+                priceElements.push({
+                  el,
+                  value: elText,
+                  numValue: num,
+                  bounds: { x: elRect.x, y: elRect.y, width: elRect.width, height: elRect.height },
+                });
+              }
+            }
+          }
+
+          // Sort prices by value (descending) - larger is RRP, smaller is sale
+          priceElements.sort((a, b) => b.numValue - a.numValue);
+
+          if (priceElements.length >= 2) {
+            // Has sale price - RRP is larger, sale is smaller
+            fields.push({
+              field: 'RRP',
+              selector: getRelativeSelector(priceElements[0].el, container),
+              value: priceElements[0].value,
+              bounds: priceElements[0].bounds,
+            });
+            fields.push({
+              field: 'Sale Price',
+              selector: getRelativeSelector(priceElements[1].el, container),
+              value: priceElements[1].value,
+              bounds: priceElements[1].bounds,
+            });
+          } else if (priceElements.length === 1) {
+            // Only one price - this is the RRP (no sale)
+            fields.push({
+              field: 'RRP',
+              selector: getRelativeSelector(priceElements[0].el, container),
+              value: priceElements[0].value,
+              bounds: priceElements[0].bounds,
+            });
+          }
+
+          // URL: product link
+          const links = container.querySelectorAll('a[href]');
+          let urlEl = container.tagName === 'A' ? container : null;
+          if (!urlEl) {
+            for (const link of links) {
+              const href = link.getAttribute('href') || '';
+              if (href && href !== '#' && !href.startsWith('javascript:')) {
+                urlEl = link;
+                break;
+              }
+            }
+          }
+          if (urlEl) {
+            const urlRect = urlEl.getBoundingClientRect();
+            fields.push({
+              field: 'URL',
+              selector: urlEl === container ? ':self' : getRelativeSelector(urlEl, container),
+              value: urlEl.getAttribute('href') || '',
+              bounds: { x: urlRect.x, y: urlRect.y, width: urlRect.width, height: urlRect.height },
+            });
+          }
+
+          // Image: first significant image
+          const images = container.querySelectorAll('img');
+          for (const img of images) {
+            const imgRect = img.getBoundingClientRect();
+            if (imgRect.width >= 50 && imgRect.height >= 50) {
+              fields.push({
+                field: 'Image',
+                selector: getRelativeSelector(img, container),
+                value: img.getAttribute('src') || img.getAttribute('data-src') || '',
+                bounds: { x: imgRect.x, y: imgRect.y, width: imgRect.width, height: imgRect.height },
+              });
+              break;
+            }
+          }
+
+          // Categorize by sale status
+          const example = {
+            selector: getNthSelector(container, i),
+            containerIndex: i,
+            fields,
+            bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          };
+
+          if (priceElements.length >= 2 && withSale.length < maxPerType) {
+            withSale.push(example);
+          } else if (priceElements.length === 1 && withoutSale.length < maxPerType) {
+            withoutSale.push(example);
+          }
+
+          // Stop if we have enough of both
+          if (withSale.length >= maxPerType && withoutSale.length >= maxPerType) {
+            break;
+          }
+        }
+
+        console.log('[DiverseExamples] Found', withSale.length, 'with sale,', withoutSale.length, 'without sale');
+
+        return { withSale, withoutSale };
+      })()
+    `;
+
+    try {
+      const result = await this.page.evaluate(script) as {
+        withSale: Array<{
+          selector: string;
+          containerIndex: number;
+          fields: Array<{
+            field: 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'Image';
+            selector: string;
+            value: string;
+            bounds: { x: number; y: number; width: number; height: number };
+          }>;
+          bounds: { x: number; y: number; width: number; height: number };
+        }>;
+        withoutSale: Array<{
+          selector: string;
+          containerIndex: number;
+          fields: Array<{
+            field: 'Title' | 'RRP' | 'URL' | 'Image';
+            selector: string;
+            value: string;
+            bounds: { x: number; y: number; width: number; height: number };
+          }>;
+          bounds: { x: number; y: number; width: number; height: number };
+        }>;
+      };
+
+      console.log(`[ProductDetector] Found ${result.withSale.length} examples with sale, ${result.withoutSale.length} without sale`);
+
+      return result;
+    } catch (error) {
+      console.error('[ProductDetector] findDiverseExamples error:', error);
+      return { withSale: [], withoutSale: [] };
+    }
+  }
+
+  /**
+   * Capture a screenshot of a specific element with another element highlighted.
+   * Used for the field confirmation wizard.
+   */
+  async captureFieldScreenshot(
+    containerSelector: string,
+    fieldSelector: string,
+    highlightColor: string = '#ff0000'
+  ): Promise<{
+    screenshot: string;
+    fieldValue: string;
+    fieldBounds: { x: number; y: number; width: number; height: number };
+  } | null> {
+    console.log(`[ProductDetector] captureFieldScreenshot: container="${containerSelector}", field="${fieldSelector}"`);
+    try {
+      // First, scroll the container into view
+      const scrollResult = await this.page.evaluate((selector) => {
+        const el = document.querySelector(selector);
+        if (el) {
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          return { found: true, tag: el.tagName };
+        }
+        return { found: false };
+      }, containerSelector);
+      console.log(`[ProductDetector] Container scroll result:`, scrollResult);
+
+      // Wait for scroll to complete
+      await this.page.waitForTimeout(200);
+
+      // Add highlight overlay to the field element
+      const highlightId = 'scraper-field-highlight-' + Date.now();
+      const evalArgs = {
+        containerSel: containerSelector,
+        fieldSel: fieldSelector,
+        color: highlightColor,
+        id: highlightId,
+      };
+      const fieldInfo = await this.page.evaluate((args: { containerSel: string; fieldSel: string; color: string; id: string }) => {
+        const container = document.querySelector(args.containerSel);
+        if (!container) return null;
+
+        // Find field element
+        let fieldEl: Element | null = null;
+        if (args.fieldSel === ':self') {
+          fieldEl = container;
+        } else {
+          fieldEl = container.querySelector(args.fieldSel);
+        }
+
+        if (!fieldEl) return null;
+
+        const fieldRect = fieldEl.getBoundingClientRect();
+
+        // Create highlight overlay
+        const overlay = document.createElement('div');
+        overlay.id = args.id;
+        overlay.style.cssText = `
+          position: fixed;
+          left: ${fieldRect.left - 4}px;
+          top: ${fieldRect.top - 4}px;
+          width: ${fieldRect.width + 8}px;
+          height: ${fieldRect.height + 8}px;
+          border: 4px solid ${args.color};
+          background: rgba(255, 0, 0, 0.1);
+          pointer-events: none;
+          z-index: 999999;
+          border-radius: 4px;
+          box-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
+        `;
+        document.body.appendChild(overlay);
+
+        // Get field value
+        let value = '';
+        if (fieldEl.tagName === 'IMG') {
+          value = (fieldEl as HTMLImageElement).src || (fieldEl as HTMLImageElement).getAttribute('data-src') || '';
+        } else if (fieldEl.tagName === 'A') {
+          value = (fieldEl as HTMLAnchorElement).href || '';
+        } else {
+          value = (fieldEl.textContent || '').trim();
+        }
+
+        return {
+          value,
+          bounds: {
+            x: fieldRect.left,
+            y: fieldRect.top,
+            width: fieldRect.width,
+            height: fieldRect.height,
+          },
+        };
+      }, evalArgs) as { value: string; bounds: { x: number; y: number; width: number; height: number } } | null;
+
+      console.log(`[ProductDetector] Field info result:`, fieldInfo ? { value: fieldInfo.value.substring(0, 50), bounds: fieldInfo.bounds } : 'null');
+
+      if (!fieldInfo) {
+        console.log(`[ProductDetector] Field not found, returning null`);
+        return null;
+      }
+
+      // Get container bounds for clipping
+      const containerBounds = await this.page.evaluate((selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          x: Math.max(0, rect.left - 20),
+          y: Math.max(0, rect.top - 20),
+          width: rect.width + 40,
+          height: rect.height + 40,
+        };
+      }, containerSelector);
+
+      if (!containerBounds) {
+        // Remove highlight
+        await this.page.evaluate((id) => {
+          const overlay = document.getElementById(id);
+          if (overlay) overlay.remove();
+        }, highlightId);
+        return null;
+      }
+
+      console.log(`[ProductDetector] Container bounds for screenshot:`, containerBounds);
+
+      // Ensure bounds are valid for screenshot
+      const viewport = this.page.viewportSize();
+      console.log(`[ProductDetector] Viewport size:`, viewport);
+
+      // Clamp bounds to viewport
+      const clampedBounds = {
+        x: Math.max(0, Math.round(containerBounds.x)),
+        y: Math.max(0, Math.round(containerBounds.y)),
+        width: Math.max(50, Math.round(containerBounds.width)),
+        height: Math.max(50, Math.round(containerBounds.height)),
+      };
+
+      // Ensure we don't exceed viewport
+      if (viewport) {
+        clampedBounds.width = Math.min(clampedBounds.width, viewport.width - clampedBounds.x);
+        clampedBounds.height = Math.min(clampedBounds.height, viewport.height - clampedBounds.y);
+      }
+
+      console.log(`[ProductDetector] Clamped bounds for screenshot:`, clampedBounds);
+
+      // Capture screenshot of just the container area
+      const screenshotBuffer = await this.page.screenshot({
+        type: 'png',
+        clip: clampedBounds,
+      });
+
+      console.log(`[ProductDetector] Screenshot buffer size: ${screenshotBuffer.length} bytes`);
+
+      // Remove highlight overlay
+      await this.page.evaluate((id) => {
+        const overlay = document.getElementById(id);
+        if (overlay) overlay.remove();
+      }, highlightId);
+
+      const base64Screenshot = screenshotBuffer.toString('base64');
+      console.log(`[ProductDetector] Base64 screenshot length: ${base64Screenshot.length} chars`);
+
+      return {
+        screenshot: base64Screenshot,
+        fieldValue: fieldInfo.value,
+        fieldBounds: fieldInfo.bounds,
+      };
+    } catch (error) {
+      console.error('[ProductDetector] captureFieldScreenshot error:', error);
+      return null;
     }
   }
 }

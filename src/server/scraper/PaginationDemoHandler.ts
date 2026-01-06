@@ -15,7 +15,7 @@ interface DemoState {
   startProductCount: number;
   startUrl: string;
   accumulatedScrollY: number;
-  lastClick?: { selector: string; x: number; y: number };
+  lastClick?: { selector: string; text: string; x: number; y: number };
   itemSelector: string;
   autoCompleteTimer?: ReturnType<typeof setTimeout>;
   urlChanged: boolean;  // Track if URL changed during demo (for pagination detection)
@@ -70,7 +70,12 @@ export class PaginationDemoHandler {
   }> {
     if (!this.state?.active) throw new Error('Demo not active');
 
+    // Store values locally in case state is cleared during async operations
+    const itemSelector = this.state.itemSelector;
+    const startProductCount = this.state.startProductCount;
+
     this.state.accumulatedScrollY += deltaY;
+    const accumulatedScroll = this.state.accumulatedScrollY;
 
     // Actually perform the scroll
     await this.page.evaluate((dy) => {
@@ -80,22 +85,33 @@ export class PaginationDemoHandler {
     // Wait for potential lazy loading
     await this.page.waitForTimeout(300);
 
-    const currentCount = await this.countProducts(this.state.itemSelector);
-    const delta = currentCount - this.state.startProductCount;
+    // Check if state was cleared during async operations (e.g., by auto-complete)
+    if (!this.state?.active) {
+      console.log('[PaginationDemo] State cleared during scroll handling, ignoring');
+      return {
+        currentCount: 0,
+        delta: 0,
+        shouldAutoComplete: false,
+        accumulatedScroll,
+      };
+    }
+
+    const currentCount = await this.countProducts(itemSelector);
+    const delta = currentCount - startProductCount;
 
     // Check if we should trigger auto-complete
     const shouldAutoComplete = delta > 0;
-    if (shouldAutoComplete) {
+    if (shouldAutoComplete && this.state?.active) {
       this.scheduleAutoComplete();
     }
 
-    console.log(`[PaginationDemo] Scroll: deltaY=${deltaY}, total=${this.state.accumulatedScrollY}, products=${currentCount} (delta: ${delta})`);
+    console.log(`[PaginationDemo] Scroll: deltaY=${deltaY}, total=${accumulatedScroll}, products=${currentCount} (delta: ${delta})`);
 
     return {
       currentCount,
       delta,
       shouldAutoComplete,
-      accumulatedScroll: this.state.accumulatedScrollY,
+      accumulatedScroll,
     };
   }
 
@@ -104,6 +120,7 @@ export class PaginationDemoHandler {
    */
   async handleClick(x: number, y: number): Promise<{
     selector: string;
+    text: string;
     currentCount: number;
     delta: number;
     urlChanged: boolean;
@@ -113,35 +130,43 @@ export class PaginationDemoHandler {
     if (!this.state?.active) throw new Error('Demo not active');
 
     const beforeUrl = this.page.url();
+    const viewport = this.page.viewportSize();
+    console.log(`[PaginationDemo] handleClick called with (${x}, ${y}), viewport: ${viewport?.width}x${viewport?.height}`);
 
     // Get element at coordinates and its selector BEFORE clicking
-    const elementInfo = await this.page.evaluate(({ x, y }) => {
-      const el = document.elementFromPoint(x, y);
-      if (!el) return null;
+    // Note: Use function declaration instead of arrow functions to avoid esbuild __name transformation issues
+    const elementInfo = await this.page.evaluate(function(coords: { x: number; y: number }) {
+      const el = document.elementFromPoint(coords.x, coords.y);
+      if (!el) {
+        return null;
+      }
 
-      // Build CSS selector with priority
-      const getSelector = (element: Element): string => {
-        if (element.id) return `#${element.id}`;
-        if (element.getAttribute('data-testid')) {
-          return `[data-testid="${element.getAttribute('data-testid')}"]`;
-        }
-        if (element.getAttribute('aria-label')) {
-          return `[aria-label="${element.getAttribute('aria-label')}"]`;
-        }
+      // Build CSS selector with priority - inline to avoid function transformation issues
+      let selector = el.tagName.toLowerCase();
+      if (el.id) {
+        selector = '#' + el.id;
+      } else if (el.getAttribute('data-testid')) {
+        selector = '[data-testid="' + el.getAttribute('data-testid') + '"]';
+      } else if (el.getAttribute('aria-label')) {
+        selector = '[aria-label="' + el.getAttribute('aria-label') + '"]';
+      } else {
         // Class-based selector
-        const classes = Array.from(element.classList)
-          .filter(c => !c.match(/^(hover|active|focus|selected|js-|is-|has-)/))
-          .slice(0, 3);
-        if (classes.length > 0) {
-          return `${element.tagName.toLowerCase()}.${classes.join('.')}`;
+        const validClasses: string[] = [];
+        for (let i = 0; i < el.classList.length && validClasses.length < 3; i++) {
+          const c = el.classList[i];
+          if (!/^(hover|active|focus|selected|js-|is-|has-)/.test(c)) {
+            validClasses.push(c);
+          }
         }
-        return element.tagName.toLowerCase();
-      };
+        if (validClasses.length > 0) {
+          selector = el.tagName.toLowerCase() + '.' + validClasses.join('.');
+        }
+      }
 
       return {
-        selector: getSelector(el),
+        selector: selector,
         tagName: el.tagName,
-        text: el.textContent?.trim().slice(0, 50),
+        text: el.textContent ? el.textContent.trim().slice(0, 50) : '',
       };
     }, { x, y });
 
@@ -152,8 +177,8 @@ export class PaginationDemoHandler {
 
     console.log(`[PaginationDemo] Click on: ${elementInfo.selector} "${elementInfo.text}"`);
 
-    // Store click info
-    this.state.lastClick = { selector: elementInfo.selector, x, y };
+    // Store click info including text
+    this.state.lastClick = { selector: elementInfo.selector, text: elementInfo.text, x, y };
 
     // Actually click the element
     await this.page.mouse.click(x, y);
@@ -192,6 +217,7 @@ export class PaginationDemoHandler {
 
       return {
         selector: elementInfo.selector,
+        text: elementInfo.text,
         currentCount: this.state.startProductCount,
         delta: 0,
         urlChanged: false,
@@ -221,6 +247,7 @@ export class PaginationDemoHandler {
 
     return {
       selector: elementInfo.selector,
+      text: elementInfo.text,
       currentCount,
       delta,
       urlChanged,
@@ -312,6 +339,7 @@ export class PaginationDemoHandler {
 
     if (this.state.lastClick) {
       result.clickSelector = this.state.lastClick.selector;
+      result.clickText = this.state.lastClick.text;
       result.clickCoordinates = { x: this.state.lastClick.x, y: this.state.lastClick.y };
     } else {
       result.scrollDistance = this.state.accumulatedScrollY;

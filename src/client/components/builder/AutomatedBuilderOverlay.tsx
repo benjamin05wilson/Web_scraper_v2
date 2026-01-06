@@ -28,6 +28,9 @@ interface AutomatedBuilderOverlayProps {
   demoResult?: DemoPaginationResult | null;
   onRetryDemo?: () => void;
   onSkipPagination?: () => void;
+
+  // Captcha-specific
+  captchaType?: string;
 }
 
 export function AutomatedBuilderOverlay({
@@ -42,6 +45,7 @@ export function AutomatedBuilderOverlay({
   demoResult,
   onRetryDemo,
   onSkipPagination,
+  captchaType = 'none',
 }: AutomatedBuilderOverlayProps) {
   // Handle keyboard shortcuts
   const handleKeyDown = useCallback(
@@ -93,6 +97,36 @@ export function AutomatedBuilderOverlay({
 
   const renderContent = () => {
     switch (type) {
+      case 'captcha':
+        return (
+          <>
+            <div className="overlay-icon" style={{ color: 'var(--accent-warning)' }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <circle cx="12" cy="16" r="1" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+            </div>
+            <h2 className="overlay-title">CAPTCHA Detected</h2>
+            <p className="overlay-description">
+              This site requires human verification. Please solve the CAPTCHA in the browser view.
+            </p>
+            <div className="captcha-status">
+              <div className="captcha-type">
+                Challenge type: <strong>{captchaType}</strong>
+              </div>
+              <div className="captcha-polling">
+                <div className="captcha-spinner" />
+                <span>Waiting for you to solve the CAPTCHA...</span>
+              </div>
+            </div>
+            <p className="overlay-hint">
+              The flow will automatically continue once the CAPTCHA is solved.
+              (Timeout: 2 minutes)
+            </p>
+          </>
+        );
+
       case 'popup':
         return (
           <>
@@ -197,7 +231,9 @@ export function AutomatedBuilderOverlay({
               )}
               {demoProgress?.lastClickedSelector && (
                 <p className="demo-method-hint">
-                  Click detected: <code>{demoProgress.lastClickedSelector}</code>
+                  Click detected: {demoProgress.lastClickedText && (
+                    <strong>"{demoProgress.lastClickedText}"</strong>
+                  )} <code>{demoProgress.lastClickedSelector}</code>
                 </p>
               )}
 
@@ -263,7 +299,10 @@ export function AutomatedBuilderOverlay({
                 {demoResult.method === 'click' && demoResult.clickSelector && (
                   <div className="demo-result-row">
                     <span className="demo-result-label">Button:</span>
-                    <code className="demo-result-value demo-selector">{demoResult.clickSelector}</code>
+                    <span className="demo-result-value">
+                      {demoResult.clickText && <strong>"{demoResult.clickText}"</strong>}
+                      {' '}<code className="demo-selector">{demoResult.clickSelector}</code>
+                    </span>
                   </div>
                 )}
 
@@ -284,8 +323,8 @@ export function AutomatedBuilderOverlay({
     }
   };
 
-  // Demo mode has actions in content, success mode has standard actions
-  const showActions = type !== 'pagination_demo';
+  // Demo mode and captcha mode have no actions - captcha only needs user to solve in browser
+  const showActions = type !== 'pagination_demo' && type !== 'captcha';
 
   // Render action buttons based on overlay type
   const renderActions = () => {
@@ -341,12 +380,14 @@ export function AutomatedBuilderOverlay({
     );
   };
 
-  // Demo mode uses a side panel that doesn't block the browser view
+  // Demo mode and captcha mode use a side panel that doesn't block the browser view
   const isDemoMode = type === 'pagination_demo';
+  const isCaptchaMode = type === 'captcha';
+  const useSidePanel = isDemoMode || isCaptchaMode;
 
   return (
-    <div className={`automated-overlay-backdrop ${isDemoMode ? 'demo-mode' : ''}`}>
-      <div className={`automated-overlay-card ${type === 'pagination_demo_success' ? 'overlay-card-wide' : ''} ${isDemoMode ? 'demo-mode-card' : ''}`}>
+    <div className={`automated-overlay-backdrop ${useSidePanel ? 'demo-mode' : ''}`}>
+      <div className={`automated-overlay-card ${type === 'pagination_demo_success' ? 'overlay-card-wide' : ''} ${useSidePanel ? 'demo-mode-card' : ''} ${isCaptchaMode ? 'captcha-mode-card' : ''}`}>
         {renderContent()}
 
         {showActions && renderActions()}
@@ -845,6 +886,40 @@ export function AutomatedBuilderOverlay({
         .overlay-btn-skip:hover {
           background: var(--bg-tertiary);
           color: var(--text-primary);
+        }
+
+        /* Captcha overlay styles */
+        .captcha-mode-card {
+          border-color: var(--accent-warning) !important;
+        }
+
+        .captcha-status {
+          background: var(--bg-secondary);
+          border: 1px solid var(--accent-warning);
+          border-radius: 8px;
+          padding: 16px;
+          margin: 16px 0;
+        }
+
+        .captcha-type {
+          color: var(--text-secondary);
+          margin-bottom: 12px;
+        }
+
+        .captcha-polling {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          color: var(--accent-primary);
+        }
+
+        .captcha-spinner {
+          width: 20px;
+          height: 20px;
+          border: 2px solid var(--accent-primary);
+          border-top-color: transparent;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
         }
       `}</style>
     </div>

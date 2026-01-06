@@ -134,10 +134,11 @@ export function ScraperPage() {
       viewportHeight = Math.round(rect.height) || 720;
     }
 
-    addLog('Opening browser...');
+    addLog('Connecting to Real Chrome...');
     session.createSession({
       url,
       viewport: { width: viewportWidth, height: viewportHeight },
+      useRealChrome: true, // Always use Real Chrome for best captcha bypass
     });
   }, [url, connected, session, addLog]);
 
@@ -339,6 +340,30 @@ export function ScraperPage() {
                   disabled={isBrowserOpen}
                 />
               </div>
+              {/* Real Chrome mode indicator */}
+              {!isBrowserOpen && (
+                <div style={{
+                  background: 'var(--bg-secondary)',
+                  border: '1px solid var(--accent-success)',
+                  padding: '8px 10px',
+                  fontSize: '11px',
+                  marginBottom: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}>
+                  <span style={{
+                    width: '6px',
+                    height: '6px',
+                    borderRadius: '50%',
+                    background: 'var(--accent-success)',
+                    display: 'inline-block',
+                  }} />
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    <strong style={{ color: 'var(--accent-success)' }}>Real Chrome</strong> - Best for protected sites
+                  </span>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: '10px' }}>
                 {!isBrowserOpen ? (
                   <button className="btn-large" onClick={handleOpenBrowser} style={{ flex: 1 }}>

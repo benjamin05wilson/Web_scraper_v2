@@ -1,16 +1,27 @@
 /**
  * Browser Pool - Pre-warmed browser instances for batch processing.
- * Provides fast browser acquisition with domain affinity.
+ * Uses Real Chrome via CDP for best Cloudflare/bot protection bypass.
+ * Each pooled browser is a separate context within the shared Chrome instance.
  */
 
-import { chromium, Browser, BrowserContext, Page, CDPSession } from 'playwright';
+import { chromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import type { Browser, BrowserContext, Page, CDPSession } from 'playwright';
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
+import { spawn } from 'child_process';
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
 import {
   CHROME_FLAGS_WINDOWS,
   IGNORED_DEFAULT_ARGS,
   CHROME_ENV_WINDOWS,
 } from '../config/chrome-flags.js';
+import { profileManager } from './ProfileManager.js';
+
+// Apply stealth plugin globally (fallback for non-Real Chrome mode)
+chromium.use(StealthPlugin());
 
 export interface PooledBrowser {
   id: string;
@@ -24,6 +35,9 @@ export interface PooledBrowser {
   jobCount: number;
   currentDomain?: string;
   healthCheckFailures: number;
+  isExecuting: boolean;      // True while a scrape job is actively running
+  currentJobId?: string;     // Track which job is currently running
+  scraper?: any;             // Persistent ScrapingEngine instance (same as scraper page session.scraper)
 }
 
 export interface PoolConfig {
@@ -34,6 +48,10 @@ export interface PoolConfig {
   healthCheckIntervalMs: number;
   maxJobsPerBrowser: number;
   memoryThresholdMb: number;
+  injectCloudflareCookies?: boolean; // Auto-inject saved Cloudflare cookies
+  useRealChrome?: boolean; // Use Real Chrome via CDP (default: true)
+  chromeDebugPort?: number; // CDP port for Real Chrome (default: 9222)
+  shareContext?: boolean; // Share single context across all browsers (for captcha solving)
 }
 
 const DEFAULT_CONFIG: PoolConfig = {
@@ -44,6 +62,10 @@ const DEFAULT_CONFIG: PoolConfig = {
   healthCheckIntervalMs: 30000,
   maxJobsPerBrowser: 50,
   memoryThresholdMb: 800,
+  injectCloudflareCookies: true, // Auto-inject by default
+  useRealChrome: true, // Use Real Chrome by default
+  chromeDebugPort: 9222,
+  shareContext: true, // Share context so captchas can be solved (default: true)
 };
 
 export class BrowserPool extends EventEmitter {
@@ -52,11 +74,102 @@ export class BrowserPool extends EventEmitter {
   private healthCheckTimer?: NodeJS.Timeout;
   private isShuttingDown = false;
   private isProduction: boolean;
+  private sharedBrowser: Browser | null = null; // Shared Real Chrome instance
+  private sharedContext: BrowserContext | null = null; // Shared context for captcha solving
 
   constructor(config: Partial<PoolConfig> = {}) {
     super();
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.isProduction = process.env.NODE_ENV === 'production';
+  }
+
+  /**
+   * Get or create the shared Real Chrome browser instance
+   */
+  private async getSharedBrowser(): Promise<Browser> {
+    if (this.sharedBrowser && this.sharedBrowser.isConnected()) {
+      return this.sharedBrowser;
+    }
+
+    const debugPort = this.config.chromeDebugPort || 9222;
+    console.log(`[BrowserPool] Connecting to Real Chrome on port ${debugPort}...`);
+
+    try {
+      // First, try to connect to existing Chrome instance
+      this.sharedBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+      console.log('[BrowserPool] Connected to existing Real Chrome');
+    } catch {
+      // Chrome not running with debug port - auto-launch it
+      console.log('[BrowserPool] Chrome not running, auto-launching...');
+      this.sharedBrowser = await this.launchRealChrome(debugPort);
+      console.log('[BrowserPool] Auto-launched Real Chrome with debug port');
+    }
+
+    return this.sharedBrowser;
+  }
+
+  /**
+   * Auto-launch Chrome with remote debugging enabled
+   */
+  private async launchRealChrome(debugPort: number): Promise<Browser> {
+    // Common Chrome paths on Windows
+    const chromePaths = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      path.join(os.homedir(), 'AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'),
+    ];
+
+    // Find Chrome
+    let chromePath: string | null = null;
+    for (const p of chromePaths) {
+      if (fs.existsSync(p)) {
+        chromePath = p;
+        break;
+      }
+    }
+
+    if (!chromePath) {
+      throw new Error('Chrome not found. Please install Google Chrome.');
+    }
+
+    // Use a separate user data dir to avoid conflicts with existing Chrome
+    const userDataDir = path.join(os.homedir(), '.chrome-scraper-profile');
+
+    console.log(`[BrowserPool] Launching Chrome from: ${chromePath}`);
+    console.log(`[BrowserPool] User data dir: ${userDataDir}`);
+
+    // Launch Chrome with remote debugging
+    const chromeProcess = spawn(chromePath, [
+      `--remote-debugging-port=${debugPort}`,
+      `--user-data-dir=${userDataDir}`,
+      '--no-first-run',
+      '--no-default-browser-check',
+    ], {
+      detached: true,
+      stdio: 'ignore',
+    });
+
+    // Don't wait for Chrome to exit
+    chromeProcess.unref();
+
+    // Wait for Chrome to start and be ready for CDP connection
+    const maxAttempts = 20;
+    const delayMs = 500;
+
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      try {
+        const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+        return browser;
+      } catch {
+        // Chrome not ready yet, keep waiting
+        if (i < maxAttempts - 1) {
+          console.log(`[BrowserPool] Waiting for Chrome to start... (${i + 1}/${maxAttempts})`);
+        }
+      }
+    }
+
+    throw new Error(`Chrome failed to start after ${maxAttempts * delayMs / 1000} seconds`);
   }
 
   /**
@@ -91,11 +204,17 @@ export class BrowserPool extends EventEmitter {
    * Pre-warm browsers with domain pre-navigation.
    * Browsers are created AND navigated to their assigned domain during warmup.
    * This warms up DNS, SSL, cookies, and page cache for faster subsequent scraping.
+   * Also injects any saved Cloudflare cookies for protected domains.
    */
   async warmupWithDomains(domains: string[], count?: number): Promise<void> {
     const targetCount = Math.min(count ?? this.config.warmupCount, this.config.maxSize);
     const uniqueDomains = [...new Set(domains)];
     console.log(`[BrowserPool] Warming up ${targetCount} browsers with ${uniqueDomains.length} domains...`);
+
+    // Initialize profile manager for cookie injection
+    if (this.config.injectCloudflareCookies) {
+      await profileManager.init();
+    }
 
     const startTime = Date.now();
     const promises: Promise<PooledBrowser | null>[] = [];
@@ -126,11 +245,26 @@ export class BrowserPool extends EventEmitter {
 
   /**
    * Create a browser and optionally pre-navigate to a domain.
+   * Injects saved Cloudflare cookies before navigation if available.
    */
   private async createBrowserWithDomain(domain?: string): Promise<PooledBrowser> {
     const browser = await this.createBrowser();
 
     if (domain) {
+      const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/^www\./, '');
+
+      // Inject Cloudflare cookies BEFORE navigation if available
+      if (this.config.injectCloudflareCookies) {
+        try {
+          const injected = await profileManager.importCookies(browser.context, cleanDomain);
+          if (injected) {
+            console.log(`[BrowserPool] Injected saved cookies for ${cleanDomain}`);
+          }
+        } catch (err) {
+          console.log(`[BrowserPool] Cookie injection for ${cleanDomain} failed (non-fatal): ${(err as Error).message}`);
+        }
+      }
+
       try {
         // Navigate to the domain's homepage to warm up DNS, SSL, cookies
         const url = domain.startsWith('http') ? domain : `https://${domain}`;
@@ -138,7 +272,7 @@ export class BrowserPool extends EventEmitter {
           waitUntil: 'commit', // Fastest wait - just HTTP response started
           timeout: 20000, // 20 second timeout for pre-navigation (IKEA can be slow)
         });
-        browser.currentDomain = domain.replace(/^https?:\/\//, '').replace(/^www\./, '');
+        browser.currentDomain = cleanDomain;
         console.log(`[BrowserPool] Browser ${browser.id.substring(0, 8)} pre-navigated to ${domain}`);
       } catch (err) {
         // Pre-navigation failure is non-fatal - browser is still usable
@@ -151,10 +285,17 @@ export class BrowserPool extends EventEmitter {
 
   /**
    * Create a single browser instance.
+   * Uses Real Chrome via CDP when enabled (default), falls back to Playwright launch.
    */
   private async createBrowser(): Promise<PooledBrowser> {
     const id = uuidv4();
 
+    // Use Real Chrome mode (default) - creates contexts in shared Chrome instance
+    if (this.config.useRealChrome && !this.isProduction) {
+      return this.createRealChromeBrowser(id);
+    }
+
+    // Fallback: Launch separate browser instances (production/Docker or when Real Chrome disabled)
     const chromeFlags = this.isProduction
       ? [
           '--no-sandbox',
@@ -225,6 +366,7 @@ export class BrowserPool extends EventEmitter {
       lastUsedAt: Date.now(),
       jobCount: 0,
       healthCheckFailures: 0,
+      isExecuting: false,
     };
 
     this.pool.set(id, pooledBrowser);
@@ -233,7 +375,80 @@ export class BrowserPool extends EventEmitter {
   }
 
   /**
+   * Create a browser using Real Chrome via CDP.
+   * When shareContext is true (default), all browsers share the same context/cookies
+   * so captchas solved in one tab apply to all. Each "browser" gets its own page (tab).
+   */
+  private async createRealChromeBrowser(id: string): Promise<PooledBrowser> {
+    const browser = await this.getSharedBrowser();
+
+    let context: BrowserContext;
+
+    if (this.config.shareContext) {
+      // Use shared context - all browsers share cookies, so captcha solved once works for all
+      if (!this.sharedContext) {
+        // Get existing context or create one
+        const existingContexts = browser.contexts();
+        if (existingContexts.length > 0) {
+          this.sharedContext = existingContexts[0];
+          console.log('[BrowserPool] Using existing browser context (shared)');
+        } else {
+          this.sharedContext = await browser.newContext({
+            viewport: { width: 1920, height: 1080 },
+            ignoreHTTPSErrors: true,
+          });
+          console.log('[BrowserPool] Created new shared context');
+        }
+      }
+      context = this.sharedContext;
+    } else {
+      // Create isolated context per browser (original behavior)
+      context = await browser.newContext({
+        viewport: { width: 1920, height: 1080 },
+        ignoreHTTPSErrors: true,
+      });
+    }
+
+    // Create a new page (tab) for this pooled browser
+    const page = await context.newPage();
+
+    // Set viewport explicitly - critical for click handling in Real Chrome
+    await page.setViewportSize({ width: 1920, height: 1080 });
+
+    const cdp = await context.newCDPSession(page);
+
+    // Enable CDP domains
+    await Promise.all([
+      cdp.send('DOM.enable'),
+      cdp.send('CSS.enable'),
+      cdp.send('Runtime.enable'),
+      cdp.send('Page.enable'),
+      (cdp.send as any)('Input.enable').catch(() => {}), // May not be available, type not in declarations
+    ]);
+
+    const pooledBrowser: PooledBrowser = {
+      id,
+      browser, // Reference to shared browser
+      context,
+      page,
+      cdp,
+      status: 'idle',
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      jobCount: 0,
+      healthCheckFailures: 0,
+      isExecuting: false,
+    };
+
+    this.pool.set(id, pooledBrowser);
+    this.emit('browser:created', { id, poolSize: this.pool.size, realChrome: true, sharedContext: this.config.shareContext });
+    console.log(`[BrowserPool] Created Real Chrome page ${id.substring(0, 8)} (shared context: ${this.config.shareContext})`);
+    return pooledBrowser;
+  }
+
+  /**
    * Acquire browser from pool (prefer domain affinity).
+   * Only returns browsers that are idle AND not currently executing a job.
    */
   async acquire(preferredDomain?: string): Promise<PooledBrowser | null> {
     // Reject if shutting down
@@ -243,9 +458,10 @@ export class BrowserPool extends EventEmitter {
     }
 
     // 1. Try to find idle browser with same domain (affinity)
+    // CRITICAL: Also check isExecuting to prevent reuse during active scrape
     if (preferredDomain) {
       for (const browser of this.pool.values()) {
-        if (browser.status === 'idle' && browser.currentDomain === preferredDomain) {
+        if (browser.status === 'idle' && !browser.isExecuting && browser.currentDomain === preferredDomain) {
           browser.status = 'busy';
           browser.lastUsedAt = Date.now();
           this.emit('browser:acquired', { id: browser.id, domain: preferredDomain, affinity: true });
@@ -254,9 +470,9 @@ export class BrowserPool extends EventEmitter {
       }
     }
 
-    // 2. Find any idle browser
+    // 2. Find any idle browser that's not executing
     for (const browser of this.pool.values()) {
-      if (browser.status === 'idle') {
+      if (browser.status === 'idle' && !browser.isExecuting) {
         browser.status = 'busy';
         browser.lastUsedAt = Date.now();
         browser.currentDomain = preferredDomain;
@@ -312,7 +528,36 @@ export class BrowserPool extends EventEmitter {
   }
 
   /**
+   * Mark a browser as currently executing a job.
+   * This prevents the browser from being acquired by another job.
+   */
+  markExecuting(browserId: string, jobId?: string): void {
+    const browser = this.pool.get(browserId);
+    if (browser) {
+      browser.isExecuting = true;
+      browser.currentJobId = jobId;
+      console.log(`[BrowserPool] Browser ${browserId.substring(0, 8)} marked as executing job ${jobId?.substring(0, 8) || 'unknown'}`);
+    }
+  }
+
+  /**
+   * Mark a browser as done executing.
+   * Call this AFTER the scrape completes (success or failure) to allow reuse.
+   */
+  markDone(browserId: string): void {
+    const browser = this.pool.get(browserId);
+    if (browser) {
+      browser.isExecuting = false;
+      browser.currentJobId = undefined;
+      console.log(`[BrowserPool] Browser ${browserId.substring(0, 8)} marked as done`);
+    }
+  }
+
+  /**
    * Recycle (close and replace) a browser.
+   * In Real Chrome mode with shared context, only closes the page (tab).
+   * In Real Chrome mode without shared context, closes the context.
+   * In standard mode, closes the browser.
    */
   private async recycleBrowser(browserId: string): Promise<void> {
     const browser = this.pool.get(browserId);
@@ -321,7 +566,18 @@ export class BrowserPool extends EventEmitter {
     console.log(`[BrowserPool] Recycling browser ${browserId.substring(0, 8)} (${browser.jobCount} jobs)`);
 
     try {
-      await browser.browser.close();
+      if (this.config.useRealChrome && !this.isProduction) {
+        if (this.config.shareContext) {
+          // Shared context mode: only close the page (tab), keep the context
+          await browser.page.close();
+        } else {
+          // Isolated context mode: close the context
+          await browser.context.close();
+        }
+      } else {
+        // Standard mode: close the browser
+        await browser.browser.close();
+      }
     } catch {
       // Ignore close errors
     }
@@ -486,12 +742,40 @@ export class BrowserPool extends EventEmitter {
     console.log(`[BrowserPool] Shutting down ${this.pool.size} browsers...`);
 
     const closePromises = [];
-    for (const browser of this.pool.values()) {
-      closePromises.push(
-        browser.browser.close().catch(() => {
-          // Ignore close errors
-        })
-      );
+
+    // In Real Chrome mode, close pages/contexts but keep Chrome running
+    if (this.config.useRealChrome && !this.isProduction) {
+      if (this.config.shareContext) {
+        // Shared context mode: close all pages (tabs)
+        for (const browser of this.pool.values()) {
+          closePromises.push(
+            browser.page.close().catch(() => {
+              // Ignore close errors
+            })
+          );
+        }
+        // Don't close the shared context - it preserves cookies for next batch
+      } else {
+        // Isolated context mode: close each context
+        for (const browser of this.pool.values()) {
+          closePromises.push(
+            browser.context.close().catch(() => {
+              // Ignore close errors
+            })
+          );
+        }
+      }
+      // Don't close the shared browser - leave Chrome running for next batch
+      // User can close it manually if they want
+    } else {
+      // Standard mode: close each browser
+      for (const browser of this.pool.values()) {
+        closePromises.push(
+          browser.browser.close().catch(() => {
+            // Ignore close errors
+          })
+        );
+      }
     }
 
     await Promise.all(closePromises);

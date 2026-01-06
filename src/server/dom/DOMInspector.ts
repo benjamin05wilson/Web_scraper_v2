@@ -926,7 +926,7 @@ export class DOMInspector {
   private onSelect?: (info: ElementSelector) => void;
   private onUrlHover?: (info: UrlHoverPayload | null) => void;
   private urlCaptureEnabled: boolean = false;
-  private productDetector: ProductDetector;
+  public productDetector: ProductDetector;
 
   constructor(page: Page, cdp: CDPSession) {
     this.page = page;

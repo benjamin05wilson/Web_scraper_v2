@@ -184,6 +184,12 @@ export class ElementScorer {
       score += 30;
     }
 
+    // Multiple prices (2+) indicate RRP + sale price - prefer these cards (+15)
+    // This helps the builder find better example cards with both prices visible
+    if (signals.priceCount && signals.priceCount >= 2) {
+      score += 15;
+    }
+
     // Product link indicates clickable product (+15)
     if (signals.hasProductLink) {
       score += 15;

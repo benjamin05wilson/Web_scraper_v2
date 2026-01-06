@@ -207,13 +207,17 @@ export class ScrapingEngine {
       // Inject IntersectionObserver override BEFORE navigation to catch all lazy loaders
       await this.injectLazyLoadBlocker();
 
-      // Navigate to start URL
-      console.log(`[ScrapingEngine] Navigating to: ${config.startUrl}`);
-      await this.page.goto(config.startUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: ScrapingEngine.NAVIGATION_TIMEOUT,
-      });
-      console.log(`[ScrapingEngine] Navigation complete, current URL: ${this.page.url()}`);
+      // Navigate to start URL (skip if empty - scrape current page)
+      if (config.startUrl && config.startUrl.length > 0) {
+        console.log(`[ScrapingEngine] Navigating to: ${config.startUrl}`);
+        await this.page.goto(config.startUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: ScrapingEngine.NAVIGATION_TIMEOUT,
+        });
+        console.log(`[ScrapingEngine] Navigation complete, current URL: ${this.page.url()}`);
+      } else {
+        console.log(`[ScrapingEngine] Scraping current page: ${this.page.url()}`);
+      }
 
       // Check for bot protection immediately after navigation
       const botBlockCheck = await this.checkForBotProtection();
@@ -274,6 +278,7 @@ export class ScrapingEngine {
 
       // Scrape pages
       const maxPages = config.pagination?.enabled ? config.pagination.maxPages : 1;
+      let previousPageUrls: Set<string> = new Set(); // Track URLs to detect duplicate pages
 
       for (let pageNum = 0; pageNum < maxPages; pageNum++) {
         // Check if page is still usable before each page scrape
@@ -286,6 +291,29 @@ export class ScrapingEngine {
 
         // Extract data from current page
         const pageItems = await this.extractPageData(config);
+
+        // DUPLICATE DETECTION: Check if we're getting the same items as before
+        // This happens when pagination clicks something but the page doesn't actually change
+        if (pageNum > 0 && pageItems.length > 0) {
+          const pageUrls = new Set(pageItems.map(item => item.url || item.title || JSON.stringify(item)).filter(Boolean));
+          const duplicateCount = [...pageUrls].filter(url => previousPageUrls.has(url as string)).length;
+          const duplicateRatio = duplicateCount / pageUrls.size;
+
+          if (duplicateRatio > 0.8) {
+            console.log(`[ScrapingEngine] Detected duplicate page (${Math.round(duplicateRatio * 100)}% overlap), stopping pagination`);
+            break;
+          }
+
+          // Update previous URLs for next iteration
+          pageUrls.forEach(url => previousPageUrls.add(url as string));
+        } else if (pageNum === 0) {
+          // First page - store URLs for comparison
+          pageItems.forEach(item => {
+            const key = item.url || item.title || JSON.stringify(item);
+            if (key) previousPageUrls.add(key);
+          });
+        }
+
         allItems.push(...pageItems);
         pagesScraped++;
 
@@ -503,6 +531,15 @@ export class ScrapingEngine {
   private async extractPageData(config: ScraperConfig): Promise<ScrapedItem[]> {
     // If item container is defined, extract from repeated elements
     if (config.itemContainer) {
+      // NEW: Check if we have separate sale/non-sale selectors
+      if (config.saleProductSelectors && config.nonSaleProductSelectors) {
+        return this.extractFromContainersWithProductTypes(
+          config.itemContainer,
+          config.saleProductSelectors,
+          config.nonSaleProductSelectors
+        );
+      }
+      // Legacy path: use flat selectors
       return this.extractFromContainers(config.itemContainer, config.selectors);
     }
 
@@ -770,10 +807,33 @@ export class ScrapingEngine {
               }
             }
 
+            // === PRICE FALLBACK: Use smallest available price ===
+            // Priority: salePrice (smallest) > originalPrice (RRP) > existing price
+            if (hasBothPriceTypes || hasOriginalPrice || hasSalePrice) {
+              var rrpVal = item.originalPrice ? parsePrice(item.originalPrice) : NaN;
+              var saleVal = item.salePrice ? parsePrice(item.salePrice) : NaN;
+              var existingPriceVal = item.price ? parsePrice(item.price) : NaN;
+
+              // Determine the best price to use
+              if (!isNaN(saleVal) && !isNaN(rrpVal)) {
+                // Both exist: use smaller one (sale price)
+                item.price = saleVal < rrpVal ? item.salePrice : item.originalPrice;
+              } else if (!isNaN(saleVal)) {
+                // Only sale price exists
+                item.price = item.salePrice;
+              } else if (!isNaN(rrpVal)) {
+                // Only RRP exists (no sale)
+                item.price = item.originalPrice;
+              }
+              // If neither exists but item.price already set, keep it
+            }
+
             // Skip items where title AND price are both null (likely non-product cards like banners/promos)
             var hasTitle = item.title !== null && item.title !== undefined;
-            var hasPrice = item.price !== null && item.price !== undefined;
-            if (!hasTitle && !hasPrice) {
+            var hasAnyPrice = item.price !== null && item.price !== undefined ||
+                              item.originalPrice !== null && item.originalPrice !== undefined ||
+                              item.salePrice !== null && item.salePrice !== undefined;
+            if (!hasTitle && !hasAnyPrice) {
               if (idx === 0) {
                 console.log('[ScrapingEngine] Skipping container #' + idx + ' - no title or price (likely not a product)');
               }
@@ -801,6 +861,201 @@ export class ScrapingEngine {
     }
 
     return result.result.value as ScrapedItem[];
+  }
+
+  /**
+   * NEW: Extract from containers with separate sale and non-sale selectors.
+   * For each product container:
+   * 1. Try the sale product Price selector first
+   * 2. If sale price element is found → use sale selectors (this is a sale product)
+   * 3. If no sale price element → use non-sale selectors (this is a regular product)
+   */
+  private async extractFromContainersWithProductTypes(
+    containerSelector: string,
+    saleSelectors: AssignedSelector[],
+    nonSaleSelectors: AssignedSelector[]
+  ): Promise<ScrapedItem[]> {
+    console.log(`[ScrapingEngine] Using selector-based product type detection`);
+    console.log(`[ScrapingEngine] Sale selectors: ${saleSelectors.length}, Non-sale selectors: ${nonSaleSelectors.length}`);
+
+    // Get the sale Price selector (to detect if product is on sale)
+    const salePriceSelector = saleSelectors.find(s => s.role === 'price')?.selector?.css || '';
+    console.log(`[ScrapingEngine] Sale price selector for detection: "${salePriceSelector}"`);
+
+    const result = await this.cdp.send('Runtime.evaluate', {
+      expression: `
+        (function() {
+          var containerSelector = ${JSON.stringify(containerSelector)};
+          var saleSelectors = ${JSON.stringify(saleSelectors)};
+          var nonSaleSelectors = ${JSON.stringify(nonSaleSelectors)};
+          var salePriceSelector = ${JSON.stringify(salePriceSelector)};
+
+          // Helper: Parse a price string to a number
+          function parsePrice(priceStr) {
+            if (!priceStr) return NaN;
+            var cleaned = priceStr.replace(/[£$€¥₹MAD\\s]/gi, '').replace(/,/g, '.');
+            var parts = cleaned.split('.');
+            if (parts.length > 2) {
+              cleaned = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
+            }
+            return parseFloat(cleaned);
+          }
+
+          // Helper: Extract value from element
+          function extractValue(el, sel) {
+            if (!el) return null;
+            var value = null;
+            switch (sel.extractionType) {
+              case 'text':
+                if (sel.role === 'price') {
+                  value = (el.textContent || '').trim();
+                } else {
+                  value = (el.textContent || '').trim();
+                }
+                break;
+              case 'href':
+                value = el.href || el.getAttribute('href');
+                if (value && !value.startsWith('http')) {
+                  value = new URL(value, window.location.origin).href;
+                }
+                break;
+              case 'src':
+                value = el.src || el.getAttribute('src') || el.getAttribute('data-src');
+                if (value && !value.startsWith('http')) {
+                  value = new URL(value, window.location.origin).href;
+                }
+                break;
+              case 'attribute':
+                value = sel.attributeName ? el.getAttribute(sel.attributeName) : null;
+                break;
+              case 'innerHTML':
+                value = el.innerHTML;
+                break;
+            }
+            return value;
+          }
+
+          // Helper: Extract data from container using selectors
+          function extractWithSelectors(container, selectors, idx) {
+            var item = {};
+
+            // Group selectors by role
+            var selectorsByRole = {};
+            selectors.forEach(function(sel) {
+              if (!selectorsByRole[sel.role]) {
+                selectorsByRole[sel.role] = [];
+              }
+              selectorsByRole[sel.role].push(sel);
+            });
+
+            // Sort each role's selectors by priority
+            Object.keys(selectorsByRole).forEach(function(role) {
+              selectorsByRole[role].sort(function(a, b) {
+                return (a.priority || 0) - (b.priority || 0);
+              });
+            });
+
+            // Extract each role
+            Object.keys(selectorsByRole).forEach(function(role) {
+              var roleSelectors = selectorsByRole[role];
+              var value = null;
+
+              for (var i = 0; i < roleSelectors.length && !value; i++) {
+                var sel = roleSelectors[i];
+                var cssSelector = sel.selector.css;
+                var el = null;
+
+                if (cssSelector === ':parent-link') {
+                  el = container.closest('a[href]');
+                } else if (cssSelector === ':self') {
+                  el = container;
+                } else {
+                  el = container.querySelector(cssSelector);
+                }
+
+                if (el) {
+                  value = extractValue(el, sel);
+                }
+              }
+
+              item[roleSelectors[0].customName || role] = value;
+            });
+
+            return item;
+          }
+
+          // Find containers
+          var containers = [];
+          try {
+            containers = document.querySelectorAll(containerSelector);
+          } catch (e) {
+            console.log('[ScrapingEngine] Container query failed:', e);
+          }
+
+          console.log('[ScrapingEngine] Found ' + containers.length + ' containers');
+
+          var items = [];
+          var saleCount = 0;
+          var nonSaleCount = 0;
+
+          containers.forEach(function(container, idx) {
+            // DETECTION: Check if sale price element exists in this container
+            var isSaleProduct = false;
+            if (salePriceSelector) {
+              var salePriceEl = container.querySelector(salePriceSelector);
+              isSaleProduct = !!salePriceEl;
+            }
+
+            // Use appropriate selectors based on product type
+            var selectorsToUse = isSaleProduct ? saleSelectors : nonSaleSelectors;
+            var item = extractWithSelectors(container, selectorsToUse, idx);
+
+            // Add product type indicator
+            item.isSaleProduct = isSaleProduct;
+
+            if (idx < 3) {
+              console.log('[ScrapingEngine] Container #' + idx + ': ' + (isSaleProduct ? 'SALE' : 'NON-SALE') + ' product');
+            }
+
+            if (isSaleProduct) {
+              saleCount++;
+            } else {
+              nonSaleCount++;
+            }
+
+            // Skip items without title AND price
+            var hasTitle = item.title !== null && item.title !== undefined;
+            var hasPrice = item.price !== null && item.price !== undefined;
+            if (!hasTitle && !hasPrice) {
+              return;
+            }
+
+            items.push(item);
+          });
+
+          console.log('[ScrapingEngine] Product type breakdown: ' + saleCount + ' sale, ' + nonSaleCount + ' non-sale');
+
+          return items;
+        })()
+      `,
+      returnByValue: true,
+      awaitPromise: false,
+    });
+
+    if (result.exceptionDetails) {
+      console.error('[ScrapingEngine] Exception details:', JSON.stringify(result.exceptionDetails, null, 2));
+      throw new Error(result.exceptionDetails.text || result.exceptionDetails.exception?.description || 'Extraction failed');
+    }
+
+    if (!result.result || result.result.value === undefined) {
+      console.error('[ScrapingEngine] No result value returned:', JSON.stringify(result, null, 2));
+      throw new Error('Extraction returned no data');
+    }
+
+    const items = result.result.value as ScrapedItem[];
+    console.log(`[ScrapingEngine] Extracted ${items.length} items with product type detection`);
+
+    return items;
   }
 
   // Special extraction for Zara's split layout where images and info are in separate rows
@@ -1450,6 +1705,25 @@ export class ScrapingEngine {
               }
             }
 
+            // === PRICE FALLBACK: Use smallest available price ===
+            // Priority: salePrice (smallest) > originalPrice (RRP) > existing price
+            if (hasBothPriceTypes || hasOriginalPrice || hasSalePrice) {
+              var rrpVal = item.originalPrice ? parsePrice(item.originalPrice) : NaN;
+              var saleVal = item.salePrice ? parsePrice(item.salePrice) : NaN;
+
+              // Determine the best price to use
+              if (!isNaN(saleVal) && !isNaN(rrpVal)) {
+                // Both exist: use smaller one (sale price)
+                item.price = saleVal < rrpVal ? item.salePrice : item.originalPrice;
+              } else if (!isNaN(saleVal)) {
+                // Only sale price exists
+                item.price = item.salePrice;
+              } else if (!isNaN(rrpVal)) {
+                // Only RRP exists (no sale)
+                item.price = item.originalPrice;
+              }
+            }
+
             // Only add items that have at least one value
             if (hasAnyValue) {
               items.push(item);
@@ -1547,18 +1821,25 @@ export class ScrapingEngine {
       return false;
     }
 
+    // Capture current URL to validate navigation stays on product pages
+    const currentUrl = this.page.url();
+    const currentPath = new URL(currentUrl).pathname;
+
     // First, dismiss any blocking overlays (OneTrust, etc.) that might intercept clicks
     await this.dismissBlockingOverlays();
 
-    // Find the ENABLED clickable element among potentially multiple matches
-    // (e.g., back/forward chevrons where back may be disabled on page 1)
+    // Find the ENABLED clickable element that looks like a pagination control
     const clickableIndex = await this.page.evaluate((sel) => {
       const elements = document.querySelectorAll(sel);
       if (elements.length === 0) return -1;
 
-      // Find the last enabled element (typically the "next" or "forward" button)
-      // Check from the end since "next" buttons are usually after "previous"
-      for (let i = elements.length - 1; i >= 0; i--) {
+      // If selector is too generic (like "span" or "a"), warn and try to be smarter
+      const isGenericSelector = /^(span|a|div|button)$/i.test(sel.trim());
+
+      // Find candidates that look like pagination controls
+      const candidates: number[] = [];
+
+      for (let i = 0; i < elements.length; i++) {
         const el = elements[i] as HTMLElement;
 
         // Check if disabled
@@ -1579,11 +1860,53 @@ export class ScrapingEngine {
         if (style.display === 'none' || style.visibility === 'hidden') continue;
         if (style.pointerEvents === 'none') continue;
 
-        // Found an enabled, visible element
-        return i;
+        // For generic selectors, apply extra filtering to find pagination-like elements
+        if (isGenericSelector) {
+          const text = el.textContent?.toLowerCase().trim() || '';
+          const ariaLabel = el.getAttribute('aria-label')?.toLowerCase() || '';
+          const title = el.getAttribute('title')?.toLowerCase() || '';
+          const href = (el as HTMLAnchorElement).href?.toLowerCase() || '';
+          const className = el.className?.toLowerCase() || '';
+
+          // Look for "next", ">" , chevron icons, or pagination-related classes/attributes
+          const isPaginationLike =
+            text === '>' ||
+            text === '›' ||
+            text === '>>' ||
+            text === 'next' ||
+            text.includes('next page') ||
+            ariaLabel.includes('next') ||
+            title.includes('next') ||
+            href.includes('page=') ||
+            href.includes('p=') ||
+            className.includes('next') ||
+            className.includes('pagination') ||
+            className.includes('pager') ||
+            el.closest('[class*="pagination"], [class*="pager"], nav[aria-label*="pagination"]');
+
+          // Skip elements that look like navigation/login/cart links
+          const isNavLink =
+            href.includes('/customer') ||
+            href.includes('/login') ||
+            href.includes('/cart') ||
+            href.includes('/account') ||
+            href.includes('/wishlist') ||
+            text.includes('sign in') ||
+            text.includes('login') ||
+            text.includes('cart') ||
+            text.includes('account');
+
+          if (isNavLink) continue;
+          if (!isPaginationLike) continue;
+        }
+
+        candidates.push(i);
       }
 
-      return -1; // No enabled element found
+      if (candidates.length === 0) return -1;
+
+      // Return the last candidate (typically "next" comes after "previous")
+      return candidates[candidates.length - 1];
     }, selector);
 
     if (clickableIndex === -1) {
@@ -1604,6 +1927,27 @@ export class ScrapingEngine {
 
     // Brief wait for any JS to execute
     await new Promise((r) => setTimeout(r, 500));
+
+    // Validate we didn't navigate away from product pages (e.g., to login page)
+    const newUrl = this.page.url();
+    const newPath = new URL(newUrl).pathname;
+
+    // Check if we navigated to a non-product page
+    const badPaths = ['/customer', '/login', '/account', '/cart', '/wishlist', '/checkout'];
+    if (badPaths.some(bad => newPath.startsWith(bad))) {
+      console.log(`[ScrapingEngine] Pagination navigated to wrong page: ${newPath}, going back...`);
+      await this.page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
+      return false;
+    }
+
+    // Check if URL changed significantly (different base path = wrong navigation)
+    const currentBasePath = currentPath.split('?')[0].replace(/\/page\/\d+/, '').replace(/[?&]p(age)?=\d+/, '');
+    const newBasePath = newPath.split('?')[0].replace(/\/page\/\d+/, '').replace(/[?&]p(age)?=\d+/, '');
+    if (currentBasePath !== newBasePath && !newPath.includes(currentBasePath)) {
+      console.log(`[ScrapingEngine] Pagination changed base path unexpectedly: ${currentBasePath} -> ${newBasePath}, going back...`);
+      await this.page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
+      return false;
+    }
 
     this.currentPage++;
     return true;

@@ -1,0 +1,42 @@
+{
+  "competitor_type": "local",
+  "country": "Hong Kong",
+  "url": "https://www.zalora.com.hk/c/women/clothing/fashion-tops/c-3/scat-24?categoryId=23&brandIds%5B%5D=10830",
+  "selectors": {
+    "saleProduct": {
+      "Title": [
+        "h3.overflow-hidden.text-ellipsis"
+      ],
+      "Price": [
+        "span.max-w-full.truncate"
+      ],
+      "URL": [
+        ":self"
+      ],
+      "Image": [
+        "img.w-full.object-contain"
+      ]
+    },
+    "nonSaleProduct": {
+      "Title": [
+        "h3.overflow-hidden.text-ellipsis"
+      ],
+      "Price": [
+        "div.max-w-full.truncate"
+      ],
+      "URL": [
+        ":self"
+      ],
+      "Image": [
+        "img.w-full.object-contain"
+      ]
+    }
+  },
+  "itemContainer": "a.relative",
+  "pagination": {
+    "type": "next_page",
+    "selector": "span",
+    "productsPerPage": -26,
+    "max_pages": 10
+  }
+}

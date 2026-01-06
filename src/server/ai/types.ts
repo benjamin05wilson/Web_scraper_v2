@@ -302,6 +302,7 @@ export interface UserDemonstratedPagination {
   scrollDistance?: number;  // Total deltaY accumulated
   // For click method
   clickSelector?: string;   // CSS selector of clicked element
+  clickText?: string;       // Text content of clicked element (for display)
   clickCoordinates?: { x: number; y: number };  // Backup if selector fails
   // Verification
   beforeProductCount: number;

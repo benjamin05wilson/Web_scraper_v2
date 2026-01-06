@@ -18,7 +18,7 @@ import { DomainScheduler } from '../utils/DomainScheduler';
 // Batch processing constants - 5 browsers for parallel scraping
 const DEFAULT_WARMUP_COUNT = 5; // Pre-warm exactly 5 browsers
 const MAX_BROWSER_SLOTS = 5; // Maximum 5 browser slots (same as single scraper, just parallel)
-const MIN_ITEMS_FOR_SUCCESS = 10; // Retry if fewer items than this
+const MIN_ITEMS_FOR_SUCCESS = 1; // Retry if fewer items than this (1 = any result is success)
 const MAX_RETRIES = 1; // Maximum retry attempts per job
 // HTTP_CONCURRENCY is configured server-side in HttpScraperBridge
 
@@ -50,6 +50,8 @@ interface BatchContextValue {
   expandedSlotId: number | null;
   // Slot interaction
   sendSlotInput: (slotId: number, type: string, data: unknown) => void;
+  // Captcha handling
+  sendCaptchaSolved: (slotId: number) => void;
   // Next URL scraping
   startNextScraping: () => Promise<void>;
   // Download
@@ -406,8 +408,50 @@ export function BatchProvider({ children }: BatchProviderProps) {
     };
 
     ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      handleBatchMessage(msg);
+      if (event.data instanceof Blob) {
+        // Binary frame data from batch screencast
+        // Format: browserId:jpegData
+        const reader = new FileReader();
+        reader.onload = () => {
+          const arrayBuffer = reader.result as ArrayBuffer;
+          const uint8Array = new Uint8Array(arrayBuffer);
+
+          // Find the colon separator between browserId and frame data
+          let colonIndex = -1;
+          for (let i = 0; i < Math.min(50, uint8Array.length); i++) {
+            if (uint8Array[i] === 0x3A) { // ':' character
+              colonIndex = i;
+              break;
+            }
+          }
+
+          if (colonIndex === -1) return;
+
+          // Extract browser ID
+          const browserIdBytes = uint8Array.slice(0, colonIndex);
+          const browserId = new TextDecoder().decode(browserIdBytes);
+
+          // Extract frame data
+          const frameData = uint8Array.slice(colonIndex + 1);
+          const base64Frame = btoa(String.fromCharCode(...frameData));
+          const dataUrl = `data:image/jpeg;base64,${base64Frame}`;
+
+          // Find which slot this browser belongs to
+          for (const [slotId, bid] of slotBrowserIdRef.current.entries()) {
+            if (bid === browserId) {
+              setBrowserSlots(prev => prev.map(s =>
+                s.id === slotId ? { ...s, frameData: dataUrl, lastUpdate: Date.now() } : s
+              ));
+              break;
+            }
+          }
+        };
+        reader.readAsArrayBuffer(event.data);
+      } else {
+        // JSON message
+        const msg = JSON.parse(event.data);
+        handleBatchMessage(msg);
+      }
     };
 
     ws.onclose = () => {
@@ -522,6 +566,48 @@ export function BatchProvider({ children }: BatchProviderProps) {
       case 'batch:error': {
         const { error } = payload as { error: string };
         console.error('[BatchContext] Batch error:', error);
+        break;
+      }
+
+      case 'batch:captchaDetected': {
+        const { browserId, challengeType, url } = payload as {
+          browserId: string;
+          challengeType: string;
+          url: string;
+        };
+
+        console.log(`[BatchContext] Captcha detected: ${challengeType} at ${url}`);
+
+        // Find which slot this browser belongs to
+        let slotId = -1;
+        for (const [sid, bid] of slotBrowserIdRef.current.entries()) {
+          if (bid === browserId) {
+            slotId = sid;
+            break;
+          }
+        }
+
+        if (slotId === -1) {
+          console.warn(`[BatchContext] Unknown browser ${browserId} for captcha`);
+          return;
+        }
+
+        // Update browser slot to show captcha state
+        setBrowserSlots(prev => prev.map(s =>
+          s.id === slotId
+            ? { ...s, status: 'captcha', captchaChallengeType: challengeType, captchaUrl: url }
+            : s
+        ));
+
+        // Update the current job to show it's blocked by captcha
+        const currentJob = slotJobsRef.current.get(slotId);
+        if (currentJob) {
+          setJobs(prev => prev.map(j =>
+            j.index === currentJob.index
+              ? { ...j, status: 'running', error: `Captcha (${challengeType}) - solve in browser` }
+              : j
+          ));
+        }
         break;
       }
     }
@@ -1141,10 +1227,64 @@ export function BatchProvider({ children }: BatchProviderProps) {
   }, []);
 
   const sendSlotInput = useCallback((slotId: number, type: string, data: unknown) => {
-    const ws = socketsRef.current.get(slotId);
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type, payload: data }));
+    // Use batch WebSocket with browserId for pool-based system
+    if (!batchWsRef.current || batchWsRef.current.readyState !== WebSocket.OPEN) {
+      console.warn(`[BatchContext] sendSlotInput: WebSocket not ready`);
+      return;
     }
+
+    const browserId = slotBrowserIdRef.current.get(slotId);
+    if (!browserId) {
+      console.warn(`[BatchContext] No browser ID for slot ${slotId}. Available:`, Array.from(slotBrowserIdRef.current.entries()));
+      return;
+    }
+
+    console.log(`[BatchContext] sendSlotInput: slot=${slotId}, browser=${browserId.substring(0, 8)}, type=${type}, data=`, data);
+
+    batchWsRef.current.send(JSON.stringify({
+      type: 'batch:slotInput',
+      payload: {
+        browserId,
+        inputType: type,
+        data,
+      },
+    }));
+  }, []);
+
+  // Send captcha solved message for a slot
+  const sendCaptchaSolved = useCallback((slotId: number) => {
+    if (!batchWsRef.current || batchWsRef.current.readyState !== WebSocket.OPEN) return;
+
+    const browserId = slotBrowserIdRef.current.get(slotId);
+    if (!browserId) {
+      console.warn(`[BatchContext] No browser ID for slot ${slotId}`);
+      return;
+    }
+
+    console.log(`[BatchContext] Sending captcha solved for slot ${slotId}, browser ${browserId}`);
+
+    // Update slot status back to scraping
+    setBrowserSlots(prev => prev.map(s =>
+      s.id === slotId
+        ? { ...s, status: 'scraping', captchaChallengeType: undefined, captchaUrl: undefined }
+        : s
+    ));
+
+    // Clear the captcha error from the job
+    const currentJob = slotJobsRef.current.get(slotId);
+    if (currentJob) {
+      setJobs(prev => prev.map(j =>
+        j.index === currentJob.index
+          ? { ...j, error: undefined }
+          : j
+      ));
+    }
+
+    // Send message to server to resume scraping
+    batchWsRef.current.send(JSON.stringify({
+      type: 'batch:captchaSolved',
+      payload: { browserId },
+    }));
   }, []);
 
   // Start Next URL scraping
@@ -1231,6 +1371,7 @@ export function BatchProvider({ children }: BatchProviderProps) {
     closeExpandedSlot,
     expandedSlotId,
     sendSlotInput,
+    sendCaptchaSolved,
     startNextScraping,
     downloadResults,
   };

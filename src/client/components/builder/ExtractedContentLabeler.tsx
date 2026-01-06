@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 
-type FieldType = 'Title' | 'Price' | 'URL' | 'NextPage' | 'Image' | 'Skip';
+type FieldType = 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'NextPage' | 'Image' | 'Skip';
 
 interface ExtractedItem {
   type: 'text' | 'link' | 'image';
@@ -33,7 +33,8 @@ interface ExtractedContentLabelerProps {
 
 const FIELD_OPTIONS: { field: FieldType; label: string; color: string }[] = [
   { field: 'Title', label: 'Title', color: '#0070f3' },
-  { field: 'Price', label: 'Price', color: '#28a745' },
+  { field: 'RRP', label: 'RRP', color: '#28a745' },
+  { field: 'Sale Price', label: 'Sale Price', color: '#17c653' },
   { field: 'URL', label: 'URL', color: '#ffc107' },
   { field: 'Image', label: 'Image', color: '#17a2b8' },
   { field: 'Skip', label: 'Skip', color: '#6c757d' },
@@ -43,14 +44,41 @@ const FIELD_OPTIONS: { field: FieldType; label: string; color: string }[] = [
 function autoDetectAssignments(items: ExtractedItem[]): Record<number, FieldType> {
   const assignments: Record<number, FieldType> = {};
   let hasTitle = false;
-  let hasPrice = false;
   let hasUrl = false;
   let hasImage = false;
 
   // Count links to determine if we should auto-assign URL
   const linkItems = items.filter(item => item.type === 'link');
 
+  // First pass: find all price-like items
+  const pricePattern = /^[$£€¥₹]?\s*\d+([.,]\d{2,3})?(\s*[-–]\s*[$£€¥₹]?\s*\d+([.,]\d{2,3})?)?$|^\d+([.,]\d{2,3})?\s*[$£€¥₹MAD]?$/;
+  const priceItems: { index: number; value: number }[] = [];
+
   items.forEach((item, index) => {
+    if (item.type === 'text' && pricePattern.test(item.value.trim())) {
+      // Parse the numeric value
+      const numStr = item.value.replace(/[^0-9.,]/g, '').replace(',', '.');
+      const num = parseFloat(numStr);
+      if (!isNaN(num)) {
+        priceItems.push({ index, value: num });
+      }
+    }
+  });
+
+  // If we have 2+ prices, assign the larger one as RRP and smaller as Sale Price
+  if (priceItems.length >= 2) {
+    priceItems.sort((a, b) => b.value - a.value); // Sort descending
+    assignments[priceItems[0].index] = 'RRP';          // Largest = RRP
+    assignments[priceItems[1].index] = 'Sale Price';   // Second = Sale Price
+  } else if (priceItems.length === 1) {
+    // Only one price - assign as RRP (it's the regular price if no sale)
+    assignments[priceItems[0].index] = 'RRP';
+  }
+
+  items.forEach((item, index) => {
+    // Skip if already assigned
+    if (assignments[index]) return;
+
     // Auto-detect URL: links containing product patterns OR the only link in container
     if (item.type === 'link' && !hasUrl) {
       const urlPatterns = ['/product/', '/p/', '/item/', '/dp/', '/pd/', '/products/', '/goods/', '/l/'];
@@ -78,16 +106,6 @@ function autoDetectAssignments(items: ExtractedItem[]): Record<number, FieldType
       return;
     }
 
-    // Auto-detect Price: text containing currency symbols or price patterns
-    if (item.type === 'text' && !hasPrice) {
-      const pricePattern = /^[$£€¥₹]?\s*\d+([.,]\d{2,3})?(\s*[-–]\s*[$£€¥₹]?\s*\d+([.,]\d{2,3})?)?$|^\d+([.,]\d{2,3})?\s*[$£€¥₹MAD]?$/;
-      if (pricePattern.test(item.value.trim())) {
-        assignments[index] = 'Price';
-        hasPrice = true;
-        return;
-      }
-    }
-
     // Auto-detect Title: first longer text that's not a price (usually product name)
     if (item.type === 'text' && !hasTitle && item.tagName) {
       const isHeading = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(item.tagName.toLowerCase());
@@ -109,12 +127,13 @@ function autoDetectAssignments(items: ExtractedItem[]): Record<number, FieldType
 function convertAILabelsToAssignments(aiLabels: AILabel[]): Record<number, FieldType> {
   const assignments: Record<number, FieldType> = {};
 
-  // Map AI field names to our FieldType (capitalize first letter)
+  // Map AI field names to our FieldType
+  // AI's "price" = current/sale price, "original_price" = RRP
   const fieldMap: Record<string, FieldType> = {
     'title': 'Title',
-    'price': 'Price',
-    'original_price': 'Price', // We treat original_price as Price (could be extended later)
-    'sale_price': 'Price',
+    'price': 'Sale Price',         // AI's "price" means the current/sale price
+    'original_price': 'RRP',       // AI's "original_price" means the RRP
+    'sale_price': 'Sale Price',    // Explicit sale_price
     'url': 'URL',
     'image': 'Image',
     'skip': 'Skip',

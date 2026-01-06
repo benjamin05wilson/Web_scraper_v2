@@ -33,6 +33,7 @@ export function BatchPage() {
     closeExpandedSlot,
     expandedSlotId,
     sendSlotInput,
+    sendCaptchaSolved,
     startNextScraping,
     downloadResults,
   } = useBatchContext();
@@ -203,6 +204,7 @@ export function BatchPage() {
         onClose={closeExpandedSlot}
         slot={expandedSlot}
         onInput={handleSlotInput}
+        onCaptchaSolved={sendCaptchaSolved}
       />
     </>
   );

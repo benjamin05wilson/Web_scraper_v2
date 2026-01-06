@@ -1,0 +1,35 @@
+{
+  "competitor_type": "local",
+  "country": "Ireland",
+  "url": "https://www.dunnesstores.com/home/bedroom/duvet-covers",
+  "selectors": {
+    "Title": [
+      "span.vtex-product-summary-2-x-productBrand.vtex-product-summary-2-x-productBrand--product-summary-name.vtex-product-summary-2-x-brandName.vtex-product-summary-2-x-brandName--product-summary-name.t-body"
+    ],
+    "Price": [
+      "span.dunnesstores-custom-blocks-1-x-currencyContainer"
+    ],
+    "URL": [
+      "a.vtex-product-summary-2-x-clearLink.vtex-product-summary-2-x-clearLink--product-list-item.vtex-product-summary-2-x-clearLink--product-list-item-mob.h-100.flex.flex-column",
+      "img.vtex-product-summary-2-x-skuSelectorItemImageValue.vtex-product-summary-2-x-skuSelectorItemImageValue--plp-sku-selector.vtex-store-components-3-x-skuSelectorItemImageValue"
+    ],
+    "Image": [
+      "img.vtex-product-summary-2-x-imageNormal.vtex-product-summary-2-x-image.vtex-product-summary-2-x-image--product-summary-image"
+    ]
+  },
+  "itemContainer": "section.vtex-product-summary-2-x-container",
+  "dismiss_actions": [
+    {
+      "selector": "[role=\"dialog\"] text=\"Accept All Cookies\"",
+      "text": "Accept All Cookies"
+    }
+  ],
+  "pagination": {
+    "type": "infinite_scroll",
+    "scrollPositions": [
+      974.4445132816832
+    ],
+    "productsPerPage": 16,
+    "max_pages": 10
+  }
+}

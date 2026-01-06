@@ -63,6 +63,12 @@ export type WSMessageType =
   | 'pagination:demoError'
   | 'popup:autoClose'
   | 'popup:closed'
+  // Captcha detection messages
+  | 'captcha:check'
+  | 'captcha:status'
+  | 'captcha:startPolling'
+  | 'captcha:solved'
+  | 'captcha:timeout'
   | 'scrollTest:start'
   | 'scrollTest:update'
   | 'scrollTest:complete'
@@ -91,7 +97,27 @@ export type WSMessageType =
   | 'batch:browserScrape'
   | 'batch:scrapeResult'
   | 'batch:getPoolStats'
-  | 'batch:poolStats';
+  | 'batch:poolStats'
+  // Batch captcha messages
+  | 'batch:captchaDetected'
+  | 'batch:captchaSolved'
+  | 'batch:captchaTimeout'
+  // Cloudflare bypass messages
+  | 'cloudflare:exportCookies'
+  | 'cloudflare:cookiesExported'
+  | 'cloudflare:getStatus'
+  | 'cloudflare:status'
+  | 'cloudflare:detected'
+  | 'cloudflare:needsManualSolve'
+  | 'cloudflare:passed'
+  // Builder wizard messages
+  | 'builder:findDiverseExamples'
+  | 'builder:diverseExamples'
+  | 'builder:captureFieldScreenshot'
+  | 'builder:fieldScreenshot'
+  | 'builder:generateWizardSteps'
+  | 'builder:wizardSteps'
+  | 'builder:nonSaleWizardSteps';
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;
@@ -106,6 +132,42 @@ export interface SessionConfig {
   viewport: { width: number; height: number };
   userAgent?: string;
   proxy?: string;
+  usePersistentProfile?: boolean; // Use persistent browser profile for Cloudflare bypass
+  useMobileEmulation?: boolean; // Use mobile user agent and viewport for bypassing bot protection
+  useRealChrome?: boolean; // Connect to user's real Chrome via CDP (best for bot protection bypass)
+  chromeDebugPort?: number; // CDP port for real Chrome connection (default: 9222)
+}
+
+// Mobile device presets for bot protection bypass
+export const MOBILE_PRESETS = {
+  iPhoneSafari: {
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  },
+  androidChrome: {
+    userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    viewport: { width: 412, height: 915 },
+    isMobile: true,
+    hasTouch: true,
+  },
+} as const;
+
+// Cloudflare Bypass Types
+export type CloudflareChallengeType = 'none' | 'turnstile' | 'captcha' | 'interstitial' | 'blocked';
+
+export interface CloudflareStatus {
+  hasChallenge: boolean;
+  challengeType: CloudflareChallengeType;
+  hasClearance: boolean;
+  clearanceExpiry?: string | null;
+}
+
+export interface CloudflareCookieExportResult {
+  success: boolean;
+  cookieCount: number;
+  domain: string;
 }
 
 export interface Session {
@@ -207,6 +269,7 @@ export interface AssignedSelector {
   extractionType: 'text' | 'attribute' | 'href' | 'src' | 'innerHTML';
   attributeName?: string;
   priority?: number; // For fallback ordering - lower number = higher priority (tried first)
+  productType?: 'sale' | 'nonSale'; // NEW: Which product type this selector is for
 }
 
 // Recorder Types
@@ -268,6 +331,9 @@ export interface ScraperConfig {
   name: string;
   startUrl: string;
   selectors: AssignedSelector[];
+  // NEW: Separate selector sets for sale vs non-sale product detection
+  saleProductSelectors?: AssignedSelector[];     // Selectors to use for sale products
+  nonSaleProductSelectors?: AssignedSelector[];  // Selectors to use for non-sale products
   preActions?: RecorderSequence; // Actions to run before scraping (popups, cookies)
   pagination?: {
     enabled: boolean;
@@ -526,6 +592,9 @@ export interface BrowserSlot {
   currentJob?: BatchJob;
   frameData?: string; // Base64 JPEG frame
   lastUpdate?: number;
+  // Captcha detection fields
+  captchaChallengeType?: string;
+  captchaUrl?: string;
 }
 
 export interface BatchProgress {

@@ -76,6 +76,16 @@ const browserManager = new BrowserManager();
 
 let batchPool: BrowserPool | null = null;
 const batchBrowserJobs = new Map<string, { slotId: number; domain: string }>();
+// Store pending jobs waiting for captcha solve
+const batchPendingCaptchaJobs = new Map<string, {
+  configName: string;
+  url: string;
+  targetProducts: number;
+  challengeType: string;
+  detectedAt: number;
+}>();
+// Track active screencasts for batch browsers (browserId -> cleanup function)
+const batchScreencasts = new Map<string, () => void>();
 
 // ============================================================================
 // EXPRESS SERVER
@@ -316,6 +326,194 @@ wss.on('connection', (ws) => {
 // ============================================================================
 
 /**
+ * Build a ScraperConfig from a saved config file - shared logic for config loading.
+ * Returns the config object without executing the scrape.
+ */
+async function buildScraperConfig(
+  configName: string,
+  startUrl: string,
+  targetProducts: number
+): Promise<ScraperConfig> {
+  // Load the saved config from disk
+  const configPath = path.join(CONFIGS_DIR, `${configName}.json`);
+  if (!fs.existsSync(configPath)) {
+    throw new Error(`Config "${configName}" not found`);
+  }
+
+  const savedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  console.log(`[buildScraperConfig] Loaded config from: ${configPath}`);
+
+  // Check if this is the NEW format with saleProduct/nonSaleProduct sections
+  const isNewFormat = savedConfig.selectors?.saleProduct || savedConfig.selectors?.nonSaleProduct;
+
+  // Helper to convert a section's selectors
+  const convertSectionSelectors = (
+    section: Record<string, string | string[]>,
+    productType: 'sale' | 'nonSale'
+  ): ScraperConfig['selectors'] => {
+    const result: ScraperConfig['selectors'] = [];
+    const fieldToRole: Record<string, string> = {
+      'Title': 'title',
+      'Price': 'price',
+      'URL': 'url',
+      'Image': 'image',
+    };
+
+    for (const [field, selectorValue] of Object.entries(section)) {
+      if (!selectorValue) continue;
+
+      const role = fieldToRole[field] || field.toLowerCase();
+      const selectorStrings = Array.isArray(selectorValue) ? selectorValue : [selectorValue];
+
+      selectorStrings.forEach((css: string, index: number) => {
+        if (typeof css === 'string' && css.trim()) {
+          result.push({
+            role: role as 'title' | 'price' | 'url' | 'image',
+            selector: {
+              css: css.trim(),
+              xpath: '',
+              attributes: {},
+              tagName: '',
+              boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+            },
+            extractionType: role === 'url' ? 'href' : role === 'image' ? 'src' : 'text',
+            priority: index,
+            productType,
+          });
+        }
+      });
+    }
+    return result;
+  };
+
+  // Prepare selector sets for both product types
+  let saleProductSelectors: ScraperConfig['selectors'] = [];
+  let nonSaleProductSelectors: ScraperConfig['selectors'] = [];
+  let convertedSelectors: ScraperConfig['selectors'] = [];
+
+  if (isNewFormat) {
+    console.log(`[buildScraperConfig] Using NEW config format with saleProduct/nonSaleProduct sections`);
+    if (savedConfig.selectors.saleProduct) {
+      saleProductSelectors = convertSectionSelectors(savedConfig.selectors.saleProduct, 'sale');
+    }
+    if (savedConfig.selectors.nonSaleProduct) {
+      nonSaleProductSelectors = convertSectionSelectors(savedConfig.selectors.nonSaleProduct, 'nonSale');
+    }
+    convertedSelectors = [...saleProductSelectors, ...nonSaleProductSelectors];
+  } else if (savedConfig.selectors && typeof savedConfig.selectors === 'object') {
+    console.log(`[buildScraperConfig] Using OLD config format with flat selectors`);
+    const fieldToRole: Record<string, string> = {
+      'Title': 'title',
+      'Price': 'price',
+      'RRP': 'originalPrice',
+      'Sale Price': 'salePrice',
+      'OriginalPrice': 'originalPrice',
+      'SalePrice': 'salePrice',
+      'URL': 'url',
+      'Image': 'image',
+    };
+
+    for (const [field, selectorValue] of Object.entries(savedConfig.selectors)) {
+      if (!selectorValue) continue;
+      const role = fieldToRole[field] || field.toLowerCase();
+      const selectorStrings = Array.isArray(selectorValue) ? selectorValue : [selectorValue];
+
+      selectorStrings.forEach((css: string, index: number) => {
+        if (typeof css === 'string' && css.trim()) {
+          convertedSelectors.push({
+            role: role as 'title' | 'price' | 'url' | 'image' | 'originalPrice' | 'salePrice',
+            selector: {
+              css: css.trim(),
+              xpath: '',
+              attributes: {},
+              tagName: '',
+              boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+            },
+            extractionType: role === 'url' ? 'href' : role === 'image' ? 'src' : 'text',
+            priority: index,
+          });
+        }
+      });
+    }
+  }
+
+  // Build advanced config from lazyLoad settings if present
+  const typedSavedConfig = savedConfig as Config;
+  let advancedConfig: AdvancedScraperConfig | undefined;
+  if (typedSavedConfig.lazyLoad) {
+    advancedConfig = {
+      scrollStrategy: typedSavedConfig.lazyLoad.scrollStrategy,
+      scrollDelay: typedSavedConfig.lazyLoad.scrollDelay,
+      maxScrollIterations: typedSavedConfig.lazyLoad.maxScrollIterations,
+      stabilityTimeout: typedSavedConfig.lazyLoad.stabilityTimeout,
+      rapidScrollStep: typedSavedConfig.lazyLoad.rapidScrollStep,
+      rapidScrollDelay: typedSavedConfig.lazyLoad.rapidScrollDelay,
+      loadingIndicators: typedSavedConfig.lazyLoad.loadingIndicators,
+    };
+  }
+
+  // Build pagination config
+  let paginationConfig: ScraperConfig['pagination'] | undefined;
+  let scrollPositions: number[] | undefined;
+
+  if (savedConfig.pagination) {
+    const paginationType = savedConfig.pagination.type;
+    if (paginationType === 'infinite_scroll') {
+      if (savedConfig.pagination.scrollPositions && savedConfig.pagination.scrollPositions.length > 0) {
+        scrollPositions = savedConfig.pagination.scrollPositions as number[];
+      }
+    } else if (paginationType === 'next_page' || paginationType === 'url_pattern') {
+      paginationConfig = {
+        enabled: true,
+        type: paginationType,
+        selector: savedConfig.pagination.selector || '',
+        pattern: savedConfig.pagination.pattern,
+        offset: savedConfig.pagination.offset,
+        maxPages: savedConfig.pagination.max_pages || 10,
+        waitAfterClick: 1000,
+      };
+    }
+  }
+
+  // Add scroll positions to advanced config if available
+  if (scrollPositions && advancedConfig) {
+    (advancedConfig as AdvancedScraperConfig & { scrollPositions?: number[] }).scrollPositions = scrollPositions;
+  } else if (scrollPositions) {
+    advancedConfig = { scrollPositions } as AdvancedScraperConfig & { scrollPositions: number[] };
+  }
+
+  // Build the final ScraperConfig
+  let config: ScraperConfig;
+  if (Array.isArray(savedConfig.selectors)) {
+    config = {
+      ...savedConfig,
+      name: configName,
+      startUrl: startUrl,
+      selectors: savedConfig.selectors,
+      pagination: paginationConfig,
+      itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
+      targetProducts: targetProducts || typedSavedConfig.targetItems || 0,
+      advanced: advancedConfig,
+    };
+  } else {
+    config = {
+      name: configName,
+      startUrl: startUrl,
+      selectors: convertedSelectors,
+      saleProductSelectors: isNewFormat ? saleProductSelectors : undefined,
+      nonSaleProductSelectors: isNewFormat ? nonSaleProductSelectors : undefined,
+      pagination: paginationConfig,
+      itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
+      autoScroll: savedConfig.autoScroll !== false,
+      targetProducts: targetProducts || typedSavedConfig.targetItems || 0,
+      advanced: advancedConfig,
+    };
+  }
+
+  return config;
+}
+
+/**
  * Execute scraping with a config - shared logic for single scraper page and batch mode.
  * This ensures both modes use identical config loading, selector conversion, and execution.
  */
@@ -335,18 +533,85 @@ async function executeScraperWithConfig(
   const savedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
   console.log(`[executeScraperWithConfig] Loaded config from: ${configPath}`);
 
-  // Convert saved config format (Config type) to ScraperConfig format
-  // Saved configs have selectors as: { Title?: string | string[], Price?: string | string[], ... }
-  // ScrapingEngine expects: selectors: AssignedSelector[]
-  const convertedSelectors: ScraperConfig['selectors'] = [];
+  // Check if this is the NEW format with saleProduct/nonSaleProduct sections
+  const isNewFormat = savedConfig.selectors?.saleProduct || savedConfig.selectors?.nonSaleProduct;
 
-  if (savedConfig.selectors && typeof savedConfig.selectors === 'object') {
-    // Map field names to selector roles
+  // Convert saved config format to ScraperConfig format
+  // NEW format: { saleProduct: { Title, Price, URL, Image }, nonSaleProduct: { Title, Price, URL, Image } }
+  // OLD format: { Title, Price, RRP, 'Sale Price', URL, Image }
+  // ScrapingEngine expects: selectors with productType info for new format
+
+  // Helper to convert a section's selectors
+  const convertSectionSelectors = (
+    section: Record<string, string | string[]>,
+    productType: 'sale' | 'nonSale'
+  ): ScraperConfig['selectors'] => {
+    const result: ScraperConfig['selectors'] = [];
     const fieldToRole: Record<string, string> = {
       'Title': 'title',
       'Price': 'price',
-      'OriginalPrice': 'originalPrice',
-      'SalePrice': 'salePrice',
+      'URL': 'url',
+      'Image': 'image',
+    };
+
+    for (const [field, selectorValue] of Object.entries(section)) {
+      if (!selectorValue) continue;
+
+      const role = fieldToRole[field] || field.toLowerCase();
+      const selectorStrings = Array.isArray(selectorValue) ? selectorValue : [selectorValue];
+
+      selectorStrings.forEach((css: string, index: number) => {
+        if (typeof css === 'string' && css.trim()) {
+          result.push({
+            role: role as 'title' | 'price' | 'url' | 'image',
+            selector: {
+              css: css.trim(),
+              xpath: '',
+              attributes: {},
+              tagName: '',
+              boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+            },
+            extractionType: role === 'url' ? 'href' : role === 'image' ? 'src' : 'text',
+            priority: index,
+            productType, // NEW: Tag selectors with their product type
+          });
+        }
+      });
+    }
+    return result;
+  };
+
+  // Prepare selector sets for both product types
+  let saleProductSelectors: ScraperConfig['selectors'] = [];
+  let nonSaleProductSelectors: ScraperConfig['selectors'] = [];
+  let convertedSelectors: ScraperConfig['selectors'] = [];
+
+  if (isNewFormat) {
+    // NEW FORMAT: Separate sale and non-sale selectors
+    console.log(`[executeScraperWithConfig] Using NEW config format with saleProduct/nonSaleProduct sections`);
+
+    if (savedConfig.selectors.saleProduct) {
+      saleProductSelectors = convertSectionSelectors(savedConfig.selectors.saleProduct, 'sale');
+      console.log(`[executeScraperWithConfig] Sale product selectors: ${saleProductSelectors.length}`);
+    }
+    if (savedConfig.selectors.nonSaleProduct) {
+      nonSaleProductSelectors = convertSectionSelectors(savedConfig.selectors.nonSaleProduct, 'nonSale');
+      console.log(`[executeScraperWithConfig] Non-sale product selectors: ${nonSaleProductSelectors.length}`);
+    }
+
+    // Combined selectors for backward compat (ScrapingEngine will handle separation)
+    convertedSelectors = [...saleProductSelectors, ...nonSaleProductSelectors];
+  } else if (savedConfig.selectors && typeof savedConfig.selectors === 'object') {
+    // OLD FORMAT: Flat selectors
+    console.log(`[executeScraperWithConfig] Using OLD config format with flat selectors`);
+
+    const fieldToRole: Record<string, string> = {
+      'Title': 'title',
+      'Price': 'price',
+      'RRP': 'originalPrice',           // From builder UI "RRP" label
+      'Sale Price': 'salePrice',        // From builder UI "Sale Price" label
+      'OriginalPrice': 'originalPrice', // Legacy/direct config format
+      'SalePrice': 'salePrice',         // Legacy/direct config format
       'URL': 'url',
       'Image': 'image',
     };
@@ -457,6 +722,9 @@ async function executeScraperWithConfig(
       name: configName,
       startUrl: startUrl,
       selectors: convertedSelectors,
+      // NEW: Include separate selector sets for sale/non-sale product detection
+      saleProductSelectors: isNewFormat ? saleProductSelectors : undefined,
+      nonSaleProductSelectors: isNewFormat ? nonSaleProductSelectors : undefined,
       // preActions removed - PopupHandler handles popups automatically
       pagination: paginationConfig,
       itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
@@ -470,6 +738,9 @@ async function executeScraperWithConfig(
   console.log(`[executeScraperWithConfig] Target products: ${config.targetProducts || 'unlimited'}`);
   console.log(`[executeScraperWithConfig] Config selectors count: ${config.selectors?.length || 0}`);
   console.log(`[executeScraperWithConfig] Item container: ${config.itemContainer || 'none'}`);
+  if (isNewFormat) {
+    console.log(`[executeScraperWithConfig] Using NEW format: sale=${saleProductSelectors.length}, nonSale=${nonSaleProductSelectors.length} selectors`);
+  }
 
   // Create scraper and execute
   const scraper = new ScrapingEngine(page, cdp);
@@ -503,7 +774,17 @@ async function handleMessage(
       console.log(`[Server] Creating session ${newSessionId} for ${config.url}`);
 
       try {
-        const browserSession = await browserManager.createSession(newSessionId, config);
+        // Choose browser mode based on config
+        let browserSession;
+        if (config.useRealChrome) {
+          console.log('[Server] Using Real Chrome mode (CDP connection)');
+          browserSession = await browserManager.connectToRealChrome(newSessionId, config);
+        } else if (config.usePersistentProfile) {
+          console.log('[Server] Using Persistent Profile mode');
+          browserSession = await browserManager.createPersistentSession(newSessionId, config);
+        } else {
+          browserSession = await browserManager.createSession(newSessionId, config);
+        }
         const inspector = new DOMInspector(browserSession.page, browserSession.cdp);
         const recorder = new InteractionRecorder(browserSession.page, browserSession.cdp);
         const scraper = new ScrapingEngine(browserSession.page, browserSession.cdp);
@@ -550,6 +831,25 @@ async function handleMessage(
           // Re-enable URL capture if it was enabled
           if (sessions.get(newSessionId)?.urlCaptureMode) {
             await inspector.enableUrlCapture();
+          }
+
+          // Re-check for captcha after navigation (for retry support)
+          const session = sessions.get(newSessionId);
+          if (session?.browserSession.cloudflareBypass) {
+            try {
+              const challenge = await session.browserSession.cloudflareBypass.detectChallenge();
+              if (challenge !== 'none') {
+                console.log(`[Server] CAPTCHA detected after navigation: ${challenge}`);
+                send(ws, 'captcha:status', {
+                  hasChallenge: true,
+                  challengeType: challenge,
+                  url: session.browserSession.page.url(),
+                  isRetry: true,
+                }, newSessionId);
+              }
+            } catch (error) {
+              console.error('[Server] CAPTCHA re-check failed:', error);
+            }
           }
         });
 
@@ -952,14 +1252,12 @@ async function handleMessage(
     }
 
     case 'scrape:execute': {
-      console.log(`[Server] scrape:execute received, sessionId from message: ${sessionId}`);
-      console.log(`[Server] getSessionId() fallback: ${getSessionId()}`);
+      // Scraper page flow - use session's existing browser (user has already navigated)
       const session = getSession(sessionId || getSessionId());
       if (!session) {
         console.error(`[Server] No session found for sessionId: ${sessionId || getSessionId()}`);
         return;
       }
-      console.log(`[Server] Found session: ${session.id}`);
 
       const requestConfig = payload as ScraperConfig & { url?: string; targetProducts?: number };
 
@@ -969,186 +1267,27 @@ async function handleMessage(
         session.selectionMode = false;
       }
 
-      console.log(`[Server] Executing scrape: ${requestConfig.name}`);
-      console.log(`[Server] Received URL: ${requestConfig.url}`);
-      console.log(`[Server] Received startUrl: ${requestConfig.startUrl}`);
-
-      // Load the saved config from disk if a name is provided
-      let config: ScraperConfig;
-      if (requestConfig.name) {
-        const configPath = path.join(CONFIGS_DIR, `${requestConfig.name}.json`);
-        if (fs.existsSync(configPath)) {
-          const savedConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-          console.log(`[Server] Loaded config from: ${configPath}`);
-
-          // Convert saved config format (Config type) to ScraperConfig format
-          // Saved configs have selectors as: { Title?: string | string[], Price?: string | string[], ... }
-          // ScrapingEngine expects: selectors: AssignedSelector[]
-          const convertedSelectors: ScraperConfig['selectors'] = [];
-
-          if (savedConfig.selectors && typeof savedConfig.selectors === 'object') {
-            // Map field names to selector roles
-            const fieldToRole: Record<string, string> = {
-              'Title': 'title',
-              'Price': 'price',
-              'OriginalPrice': 'originalPrice',
-              'SalePrice': 'salePrice',
-              'URL': 'url',
-              'Image': 'image',
-            };
-
-            for (const [field, selectorValue] of Object.entries(savedConfig.selectors)) {
-              if (!selectorValue) continue;
-
-              const role = fieldToRole[field] || field.toLowerCase();
-              const selectorStrings = Array.isArray(selectorValue) ? selectorValue : [selectorValue];
-
-              // Add each selector string as an AssignedSelector
-              selectorStrings.forEach((css: string, index: number) => {
-                if (typeof css === 'string' && css.trim()) {
-                  convertedSelectors.push({
-                    role: role as any,
-                    selector: {
-                      css: css.trim(),
-                      xpath: '',
-                      attributes: {},
-                      tagName: '',
-                      boundingBox: { x: 0, y: 0, width: 0, height: 0 },
-                    },
-                    extractionType: role === 'url' ? 'href' : role === 'image' ? 'src' : 'text',
-                    priority: index, // First selector has priority 0 (highest)
-                  });
-                }
-              });
-            }
-          }
-
-          // Build advanced config from lazyLoad settings if present
-          const typedSavedConfig = savedConfig as Config;
-          let advancedConfig: AdvancedScraperConfig | undefined;
-          if (typedSavedConfig.lazyLoad) {
-            advancedConfig = {
-              scrollStrategy: typedSavedConfig.lazyLoad.scrollStrategy,
-              scrollDelay: typedSavedConfig.lazyLoad.scrollDelay,
-              maxScrollIterations: typedSavedConfig.lazyLoad.maxScrollIterations,
-              stabilityTimeout: typedSavedConfig.lazyLoad.stabilityTimeout,
-              rapidScrollStep: typedSavedConfig.lazyLoad.rapidScrollStep,
-              rapidScrollDelay: typedSavedConfig.lazyLoad.rapidScrollDelay,
-              loadingIndicators: typedSavedConfig.lazyLoad.loadingIndicators,
-            };
-            console.log(`[Server] Applied lazyLoad settings: ${JSON.stringify(advancedConfig)}`);
-          }
-
-          // Convert dismiss_actions to preActions format for ScrapingEngine
-          let preActions: ScraperConfig['preActions'] | undefined;
-          if (savedConfig.dismiss_actions && Array.isArray(savedConfig.dismiss_actions) && savedConfig.dismiss_actions.length > 0) {
-            preActions = {
-              id: 'dismiss-actions',
-              name: 'Dismiss Popups',
-              createdAt: Date.now(),
-              actions: savedConfig.dismiss_actions.map((action: any, idx: number) => ({
-                id: `dismiss-${idx}`,
-                type: 'click' as const,
-                selector: action.selector,
-                description: `Click ${action.selector}`,
-                timestamp: action.timestamp || Date.now(),
-              })),
-            };
-            console.log(`[Server] Converted ${savedConfig.dismiss_actions.length} dismiss actions to preActions`);
-          }
-
-          // Build pagination config based on saved pagination data
-          let paginationConfig: ScraperConfig['pagination'] | undefined;
-          let scrollPositions: number[] | undefined;
-
-          if (savedConfig.pagination) {
-            const paginationType = savedConfig.pagination.type;
-            // For infinite_scroll, we don't need a selector - just enable auto-scroll
-            if (paginationType === 'infinite_scroll') {
-              // Infinite scroll is handled by autoScroll
-              // If we have recorded scroll positions, use them
-              if (savedConfig.pagination.scrollPositions && savedConfig.pagination.scrollPositions.length > 0) {
-                scrollPositions = savedConfig.pagination.scrollPositions as number[];
-                console.log(`[Server] Pagination type: infinite_scroll with ${scrollPositions!.length} recorded scroll positions`);
-              } else {
-                console.log(`[Server] Pagination type: infinite_scroll - using auto-scroll`);
-              }
-            } else if (paginationType === 'next_page' || paginationType === 'url_pattern') {
-              paginationConfig = {
-                enabled: true,
-                type: paginationType,
-                selector: savedConfig.pagination.selector || '',
-                pattern: savedConfig.pagination.pattern,
-                offset: savedConfig.pagination.offset,
-                maxPages: savedConfig.pagination.max_pages || 10,
-                waitAfterClick: 1000,
-              };
-              console.log(`[Server] Pagination type: ${paginationType}, selector: ${paginationConfig.selector || 'N/A'}`);
-              if (paginationConfig.offset) {
-                console.log(`[Server] Offset config: key=${paginationConfig.offset.key}, start=${paginationConfig.offset.start}, increment=${paginationConfig.offset.increment}`);
-              }
-            }
-          }
-
-          // Add scroll positions to advanced config if available
-          if (scrollPositions && advancedConfig) {
-            (advancedConfig as any).scrollPositions = scrollPositions;
-          } else if (scrollPositions) {
-            advancedConfig = { scrollPositions } as any;
-          }
-
-          // If the saved config already has selectors in the correct format (AssignedSelector[]), use them
-          if (Array.isArray(savedConfig.selectors)) {
-            config = {
-              ...savedConfig,
-              name: requestConfig.name,
-              startUrl: requestConfig.url || requestConfig.startUrl || savedConfig.startUrl || savedConfig.url || session.browserSession.page.url(),
-              selectors: savedConfig.selectors,
-              preActions,
-              pagination: paginationConfig,
-              itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
-              targetProducts: requestConfig.targetProducts || typedSavedConfig.targetItems || 0,
-              advanced: advancedConfig,
-            };
-          } else {
-            config = {
-              name: requestConfig.name,
-              startUrl: requestConfig.url || requestConfig.startUrl || savedConfig.startUrl || savedConfig.url || session.browserSession.page.url(),
-              selectors: convertedSelectors,
-              preActions,
-              pagination: paginationConfig,
-              itemContainer: savedConfig.itemContainer || typedSavedConfig.itemContainer,
-              autoScroll: savedConfig.autoScroll !== false,
-              targetProducts: requestConfig.targetProducts || typedSavedConfig.targetItems || 0,
-              advanced: advancedConfig,
-            };
-          }
-
-          console.log(`[Server] Converted ${convertedSelectors.length} selectors from saved config`);
-          if (config.itemContainer) {
-            console.log(`[Server] Item container: ${config.itemContainer}`);
-          }
-        } else {
-          console.error(`[Server] Config not found: ${configPath}`);
-          send(ws, 'scrape:result', { success: false, error: `Config "${requestConfig.name}" not found` }, session.id);
-          break;
-        }
-      } else {
-        // Use config as-is, but ensure startUrl is set
-        config = {
-          ...requestConfig,
-          startUrl: requestConfig.url || requestConfig.startUrl || session.browserSession.page.url(),
-          selectors: requestConfig.selectors || [],
-          targetProducts: requestConfig.targetProducts || 0,
-        };
+      if (!requestConfig.name) {
+        send(ws, 'scrape:error', { error: 'Config name is required' }, session.id);
+        break;
       }
 
-      console.log(`[Server] Final startUrl for scrape: ${config.startUrl}`);
-      console.log(`[Server] Target products: ${config.targetProducts || 'unlimited'}`);
-      console.log(`[Server] Config selectors count: ${config.selectors?.length || 0}`);
-      console.log(`[Server] Item container: ${config.itemContainer || 'none'}`);
+      const targetProducts = requestConfig.targetProducts || 0;
+
+      console.log(`[Server] Executing scrape: ${requestConfig.name}, target: ${targetProducts || 'unlimited'}`);
 
       try {
+        // Load and build config using the shared helper
+        const config = await buildScraperConfig(
+          requestConfig.name,
+          session.browserSession.page.url(), // Use current page URL (user already navigated)
+          targetProducts
+        );
+
+        // Use SESSION's scraper - this scrapes the CURRENT page without re-navigating
+        // This is different from batch which needs to navigate to each URL
+        config.startUrl = ''; // Empty = don't navigate, scrape current page
+
         const result = await session.scraper.execute(config);
         console.log(`[Server] Scrape complete: ${result.items?.length || 0} items`);
         send(ws, 'scrape:result', result, session.id);
@@ -1504,6 +1643,11 @@ async function handleMessage(
       const session = getSession(sessionId || getSessionId());
       if (!session || !session.paginationDemoHandler) return;
 
+      // Silently ignore if demo is no longer active (e.g., already auto-completed)
+      if (!session.paginationDemoHandler.isActive()) {
+        return;
+      }
+
       const { deltaY } = payload as { deltaY: number };
 
       try {
@@ -1516,8 +1660,11 @@ async function handleMessage(
           accumulatedScroll: result.accumulatedScroll,
         }, session.id);
       } catch (error: any) {
-        console.error('[Server] Pagination demo scroll failed:', error);
-        send(ws, 'pagination:demoError', { error: error.message }, session.id);
+        // Only log if it's not a "demo not active" error (which is expected during race conditions)
+        if (!error.message?.includes('Demo not active')) {
+          console.error('[Server] Pagination demo scroll failed:', error);
+        }
+        // Don't send error to client for expected race conditions
       }
       break;
     }
@@ -1534,6 +1681,7 @@ async function handleMessage(
         send(ws, 'pagination:demoProgress', {
           type: 'click',
           selector: result.selector,
+          text: result.text,
           currentCount: result.currentCount,
           delta: result.delta,
           urlChanged: result.urlChanged,
@@ -1575,6 +1723,81 @@ async function handleMessage(
         session.paginationDemoHandler.cancelDemo();
         session.paginationDemoHandler = undefined;
         console.log('[Server] Pagination demo cancelled');
+      }
+      break;
+    }
+
+    // =========================================================================
+    // CAPTCHA DETECTION & POLLING
+    // =========================================================================
+
+    case 'captcha:check': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      console.log('[Server] Checking for CAPTCHA...');
+
+      try {
+        // Create CloudflareBypass if not exists
+        if (!session.browserSession.cloudflareBypass) {
+          const { CloudflareBypass } = await import('./browser/CloudflareBypass.js');
+          session.browserSession.cloudflareBypass = new CloudflareBypass(session.browserSession.page);
+        }
+
+        const challengeType = await session.browserSession.cloudflareBypass.detectChallenge();
+        console.log(`[Server] CAPTCHA check result: ${challengeType}`);
+
+        send(ws, 'captcha:status', {
+          hasChallenge: challengeType !== 'none',
+          challengeType,
+          url: session.browserSession.page.url(),
+        }, session.id);
+      } catch (error) {
+        console.error('[Server] CAPTCHA check failed:', error);
+        send(ws, 'captcha:status', {
+          hasChallenge: false,
+          challengeType: 'none',
+          error: String(error),
+        }, session.id);
+      }
+      break;
+    }
+
+    case 'captcha:startPolling': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { timeoutMs = 120000 } = payload as { timeoutMs?: number };
+      console.log(`[Server] Starting CAPTCHA solve polling (timeout: ${timeoutMs}ms)...`);
+
+      try {
+        // Create CloudflareBypass if not exists
+        if (!session.browserSession.cloudflareBypass) {
+          const { CloudflareBypass } = await import('./browser/CloudflareBypass.js');
+          session.browserSession.cloudflareBypass = new CloudflareBypass(session.browserSession.page);
+        }
+
+        // Use existing waitForManualSolve with polling
+        const solved = await session.browserSession.cloudflareBypass.waitForManualSolve(timeoutMs);
+
+        if (solved) {
+          console.log('[Server] CAPTCHA solved successfully');
+          send(ws, 'captcha:solved', {
+            success: true,
+            url: session.browserSession.page.url(),
+          }, session.id);
+        } else {
+          console.log('[Server] CAPTCHA solve timed out');
+          send(ws, 'captcha:timeout', {
+            timedOut: true,
+            url: session.browserSession.page.url(),
+          }, session.id);
+        }
+      } catch (error) {
+        console.error('[Server] CAPTCHA polling failed:', error);
+        send(ws, 'captcha:timeout', {
+          error: String(error),
+        }, session.id);
       }
       break;
     }
@@ -1696,6 +1919,323 @@ async function handleMessage(
           success: false,
           error: String(error),
           labels: [],
+        }, session.id);
+      }
+      break;
+    }
+
+    // =========================================================================
+    // SCROLL TEST
+    // =========================================================================
+
+    // =========================================================================
+    // BUILDER WIZARD - Field Confirmation
+    // =========================================================================
+
+    case 'builder:findDiverseExamples': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { containerSelector, maxPerType = 2 } = payload as {
+        containerSelector: string;
+        maxPerType?: number;
+      };
+
+      console.log(`[Server] Finding diverse product examples for: ${containerSelector}`);
+
+      try {
+        const result = await session.inspector.productDetector.findDiverseExamples(
+          containerSelector,
+          maxPerType
+        );
+
+        console.log(`[Server] Found ${result.withSale.length} sale items, ${result.withoutSale.length} non-sale items`);
+
+        send(ws, 'builder:diverseExamples', {
+          success: true,
+          ...result,
+        }, session.id);
+      } catch (error) {
+        console.error('[Server] findDiverseExamples failed:', error);
+        send(ws, 'builder:diverseExamples', {
+          success: false,
+          error: String(error),
+          withSale: [],
+          withoutSale: [],
+        }, session.id);
+      }
+      break;
+    }
+
+    case 'builder:captureFieldScreenshot': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { containerSelector, fieldSelector, highlightColor = '#ff0000' } = payload as {
+        containerSelector: string;
+        fieldSelector: string;
+        highlightColor?: string;
+      };
+
+      console.log(`[Server] Capturing field screenshot: ${fieldSelector} in ${containerSelector}`);
+
+      try {
+        const result = await session.inspector.productDetector.captureFieldScreenshot(
+          containerSelector,
+          fieldSelector,
+          highlightColor
+        );
+
+        if (result) {
+          send(ws, 'builder:fieldScreenshot', {
+            success: true,
+            ...result,
+          }, session.id);
+        } else {
+          send(ws, 'builder:fieldScreenshot', {
+            success: false,
+            error: 'Failed to capture screenshot',
+          }, session.id);
+        }
+      } catch (error) {
+        console.error('[Server] captureFieldScreenshot failed:', error);
+        send(ws, 'builder:fieldScreenshot', {
+          success: false,
+          error: String(error),
+        }, session.id);
+      }
+      break;
+    }
+
+    case 'builder:generateWizardSteps': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { containerSelector, phase, immediateNonSale } = payload as {
+        containerSelector: string;
+        phase?: 'sale' | 'nonSale';
+        immediateNonSale?: boolean; // NEW: true = all fields, false = RRP only
+      };
+      const isNonSalePhase = phase === 'nonSale';
+      const responseType = isNonSalePhase ? 'builder:nonSaleWizardSteps' : 'builder:wizardSteps';
+
+      console.log(`[Server] Generating wizard steps for: ${containerSelector}, phase: ${phase || 'sale'}, immediateNonSale: ${immediateNonSale}`);
+
+      try {
+        // Step 1: Find diverse examples (with sale and without)
+        const examples = await session.inspector.productDetector.findDiverseExamples(
+          containerSelector,
+          2
+        );
+
+        console.log(`[Server] Diverse examples found - withSale: ${examples.withSale.length}, withoutSale: ${examples.withoutSale.length}`);
+        if (examples.withSale.length > 0) {
+          console.log(`[Server] First sale example:`, JSON.stringify(examples.withSale[0], null, 2));
+        }
+        if (examples.withoutSale.length > 0) {
+          console.log(`[Server] First non-sale example:`, JSON.stringify(examples.withoutSale[0], null, 2));
+          console.log(`[Server] Non-sale example field names:`, examples.withoutSale[0].fields.map((f: { field: string }) => f.field));
+        }
+
+        // Check if we have the right type of examples for this phase
+        if (isNonSalePhase && examples.withoutSale.length === 0) {
+          send(ws, responseType, {
+            success: false,
+            error: 'No non-sale product examples found',
+            steps: [],
+          }, session.id);
+          break;
+        }
+
+        if (!isNonSalePhase && examples.withSale.length === 0 && examples.withoutSale.length === 0) {
+          send(ws, responseType, {
+            success: false,
+            error: 'No product examples found',
+            steps: [],
+          }, session.id);
+          break;
+        }
+
+        const steps: Array<{
+          field: string;
+          question: string;
+          screenshot: string;
+          extractedValue: string;
+          selector: string;
+          elementBounds: { x: number; y: number; width: number; height: number };
+          cardType: 'withSale' | 'withoutSale';
+        }> = [];
+
+        const fieldColors: Record<string, string> = {
+          'Title': '#0070f3',
+          'RRP': '#28a745',
+          'Sale Price': '#17c653',
+          'URL': '#ffc107',
+          'Image': '#17a2b8',
+        };
+
+        // Helper to capture a field screenshot and add to steps
+        const captureFieldStep = async (
+          example: typeof examples.withSale[0],
+          fieldData: { field: string; selector: string },
+          question: string,
+          cardType: 'withSale' | 'withoutSale'
+        ) => {
+          const highlightColor = fieldColors[fieldData.field] || '#ff0000';
+          console.log(`[Server] Capturing screenshot for ${cardType} field ${fieldData.field}: container=${example.selector}, field=${fieldData.selector}`);
+
+          const screenshot = await session.inspector.productDetector.captureFieldScreenshot(
+            example.selector,
+            fieldData.selector,
+            highlightColor
+          );
+
+          if (screenshot) {
+            console.log(`[Server] Screenshot result for ${fieldData.field} (${cardType}): ${screenshot.screenshot.length} bytes`);
+            steps.push({
+              field: fieldData.field,
+              question,
+              screenshot: screenshot.screenshot,
+              extractedValue: screenshot.fieldValue,
+              selector: fieldData.selector,
+              elementBounds: screenshot.fieldBounds,
+              cardType,
+            });
+          } else {
+            console.log(`[Server] No screenshot for ${fieldData.field} (${cardType})`);
+          }
+        };
+
+        // Track auto-detected fields that we don't ask the user about (e.g., RRP for sale products)
+        const autoDetectedFields: Array<{ field: string; selector: string; value: string }> = [];
+
+        // PHASE-BASED PROCESSING: Generate steps based on the requested phase
+        if (isNonSalePhase) {
+          // NON-SALE PHASE: Generate non-sale product steps
+          // - If immediateNonSale=true: Show ALL fields (Title, RRP, URL, Image) - before pagination
+          // - If immediateNonSale=false: Show RRP ONLY - after pagination (other fields already confirmed)
+          const nonSaleExample = examples.withoutSale[0];
+          console.log(`[Server] NON-SALE PHASE: Processing non-sale product fields (immediateNonSale=${immediateNonSale})...`);
+          console.log(`[Server] NON-SALE example fields:`, nonSaleExample.fields.map(f => ({ field: f.field, value: f.value?.substring(0, 30) })));
+
+          // Title - only for immediate wizard (before pagination)
+          if (immediateNonSale) {
+            const nonSaleTitleField = nonSaleExample.fields.find(f => f.field === 'Title');
+            if (nonSaleTitleField) {
+              await captureFieldStep(nonSaleExample, nonSaleTitleField, '📦 NON-SALE PRODUCT: Is this the TITLE?', 'withoutSale');
+            } else {
+              console.log(`[Server] NON-SALE: No Title field found`);
+            }
+          }
+
+          // RRP - always ask (this is the key field for non-sale products)
+          const nonSaleRrpField = nonSaleExample.fields.find(f => f.field === 'RRP');
+          if (nonSaleRrpField) {
+            await captureFieldStep(nonSaleExample, nonSaleRrpField, '📦 NON-SALE PRODUCT: Is this the REGULAR PRICE? (Full price, not discounted)', 'withoutSale');
+          } else {
+            console.log(`[Server] NON-SALE: No RRP field found - available fields:`, nonSaleExample.fields.map(f => f.field));
+          }
+
+          // Non-sale products don't have Sale Price, skip it
+
+          // URL - only for immediate wizard (before pagination)
+          if (immediateNonSale) {
+            const nonSaleUrlField = nonSaleExample.fields.find(f => f.field === 'URL');
+            if (nonSaleUrlField) {
+              await captureFieldStep(nonSaleExample, nonSaleUrlField, '📦 NON-SALE PRODUCT: Is this the PRODUCT URL?', 'withoutSale');
+            } else {
+              console.log(`[Server] NON-SALE: No URL field found`);
+            }
+          }
+
+          // Image - only for immediate wizard (before pagination)
+          if (immediateNonSale) {
+            const nonSaleImageField = nonSaleExample.fields.find(f => f.field === 'Image');
+            if (nonSaleImageField) {
+              await captureFieldStep(nonSaleExample, nonSaleImageField, '📦 NON-SALE PRODUCT: Is this the PRODUCT IMAGE?', 'withoutSale');
+            } else {
+              console.log(`[Server] NON-SALE: No Image field found`);
+            }
+          }
+
+          console.log(`[Server] NON-SALE PHASE complete: generated ${steps.length} steps (immediateNonSale=${immediateNonSale})`);
+        } else {
+          // SALE PHASE (default): Only generate sale product steps (before pagination)
+          // For sale products: Only ask about Sale Price (NOT RRP) - RRP is auto-detected silently
+          if (examples.withSale.length > 0) {
+            const saleExample = examples.withSale[0];
+            console.log(`[Server] SALE PHASE: Processing sale product fields...`);
+
+            const saleTitleField = saleExample.fields.find(f => f.field === 'Title');
+            if (saleTitleField) {
+              await captureFieldStep(saleExample, saleTitleField, '🏷️ SALE PRODUCT: Is this the TITLE?', 'withSale');
+            }
+
+            // NOTE: RRP is auto-detected silently for sale products - we don't ask the user about it
+            // The RRP selector is still available in the detected fields for the config
+            const saleRrpField = saleExample.fields.find(f => f.field === 'RRP');
+            if (saleRrpField) {
+              console.log(`[Server] SALE PHASE: RRP auto-detected silently: ${saleRrpField.selector} = "${saleRrpField.value?.substring(0, 30)}"`);
+              // Add to auto-detected fields so client can include it in the config
+              autoDetectedFields.push({
+                field: 'RRP',
+                selector: saleRrpField.selector,
+                value: saleRrpField.value || '',
+              });
+            }
+
+            // Only ask user to confirm the Sale Price (the discounted price)
+            const salePriceField = saleExample.fields.find(f => f.field === 'Sale Price');
+            if (salePriceField) {
+              await captureFieldStep(saleExample, salePriceField, '🏷️ SALE PRODUCT: Is this the SALE PRICE? (Current discounted price)', 'withSale');
+            }
+
+            const saleUrlField = saleExample.fields.find(f => f.field === 'URL');
+            if (saleUrlField) {
+              await captureFieldStep(saleExample, saleUrlField, '🏷️ SALE PRODUCT: Is this the PRODUCT URL?', 'withSale');
+            }
+
+            const saleImageField = saleExample.fields.find(f => f.field === 'Image');
+            if (saleImageField) {
+              await captureFieldStep(saleExample, saleImageField, '🏷️ SALE PRODUCT: Is this the PRODUCT IMAGE?', 'withSale');
+            }
+          } else if (examples.withoutSale.length > 0) {
+            // Fallback: No sale products, use non-sale for the initial phase
+            const nonSaleExample = examples.withoutSale[0];
+            console.log(`[Server] SALE PHASE but only NON-SALE products found, processing non-sale fields...`);
+
+            for (const fieldData of nonSaleExample.fields) {
+              const questions: Record<string, string> = {
+                'Title': '📦 NON-SALE PRODUCT: Is this the TITLE?',
+                'RRP': '📦 NON-SALE PRODUCT: Is this the REGULAR PRICE?',
+                'URL': '📦 NON-SALE PRODUCT: Is this the PRODUCT URL?',
+                'Image': '📦 NON-SALE PRODUCT: Is this the PRODUCT IMAGE?',
+              };
+              await captureFieldStep(nonSaleExample, fieldData, questions[fieldData.field] || `Is this the ${fieldData.field}?`, 'withoutSale');
+            }
+          }
+        }
+
+        console.log(`[Server] Generated ${steps.length} wizard steps total for phase: ${phase || 'sale'}`);
+        if (autoDetectedFields.length > 0) {
+          console.log(`[Server] Auto-detected fields (not shown to user): ${JSON.stringify(autoDetectedFields)}`);
+        }
+
+        send(ws, responseType, {
+          success: true,
+          steps,
+          autoDetectedFields, // Fields like RRP that were detected but not shown to user
+          exampleCount: {
+            withSale: examples.withSale.length,
+            withoutSale: examples.withoutSale.length,
+          },
+        }, session.id);
+      } catch (error) {
+        console.error('[Server] generateWizardSteps failed:', error);
+        send(ws, responseType, {
+          success: false,
+          error: String(error),
+          steps: [],
         }, session.id);
       }
       break;
@@ -1982,11 +2522,12 @@ async function handleMessage(
 
     case 'batch:browserScrape': {
       // Browser-based scraping - uses SAME logic as single scraper page
-      const { browserId, configName, url, targetProducts = 100 } = payload as {
+      const { browserId, configName, url, targetProducts = 100, jobId } = payload as {
         browserId: string;
         configName: string;
         url: string;
         targetProducts?: number;
+        jobId?: string;
       };
 
       if (!batchPool || batchPool.isShutdown()) {
@@ -1995,6 +2536,7 @@ async function handleMessage(
           success: false,
           error: 'Pool not initialized or shutting down',
           items: [],
+          jobId,
         }, sessionId);
         break;
       }
@@ -2006,27 +2548,66 @@ async function handleMessage(
           success: false,
           error: 'Browser not found',
           items: [],
+          jobId,
         }, sessionId);
         break;
       }
 
-      try {
-        console.log(`[Server] batch:browserScrape starting for ${url} with config ${configName}`);
+      // CRITICAL: Mark browser as executing BEFORE any work starts
+      // This prevents the browser from being reused while scrape is running
+      batchPool.markExecuting(browserId, jobId);
 
-        // Navigate to URL first (45s timeout for heavy sites like IKEA)
+      try {
+        console.log(`[Server] batch:browserScrape starting for ${url} with config ${configName}, targetProducts=${targetProducts} (job: ${jobId?.substring(0, 8) || 'none'})`);
+
+        // EXACT SAME LOGIC AS SCRAPER PAGE:
+        // 1. Navigate to URL (like user does in scraper page)
         await browser.page.goto(url, {
           waitUntil: 'domcontentloaded',
           timeout: 45000
         });
 
-        // Use the SAME scraping logic as the single scraper page
-        const result = await executeScraperWithConfig(
-          browser.page,
-          browser.cdp,
-          configName,
-          url,
-          targetProducts
-        );
+        // 2. Build config with empty startUrl (don't re-navigate)
+        const config = await buildScraperConfig(configName, '', targetProducts);
+
+        // 3. Use browser's existing scraper instance if available, otherwise create new
+        // This ensures pagination state is handled the same way
+        if (!browser.scraper) {
+          browser.scraper = new ScrapingEngine(browser.page, browser.cdp);
+        }
+        const result = await browser.scraper.execute(config);
+
+        console.log(`[Server] batch:browserScrape completed for ${url}: ${result.items?.length || 0} items, success=${result.success}`);
+
+        // Check if scrape was blocked by bot protection (captcha, cloudflare, etc.)
+        if (!result.success && result.errors?.some(e =>
+          e.includes('Cloudflare') || e.includes('CAPTCHA') || e.includes('access denied') || e.includes('blocked')
+        )) {
+          console.log(`[Server] Bot protection detected in batch scrape at ${url}`);
+
+          // Store the pending job info for resumption
+          batchPendingCaptchaJobs.set(browserId, {
+            configName,
+            url,
+            targetProducts,
+            challengeType: 'bot_protection',
+            detectedAt: Date.now(),
+          });
+
+          // Start streaming frames so user can see and solve the captcha
+          await startBatchScreencast(ws, browserId, browser.cdp, sessionId);
+
+          // Send captcha detection to client
+          send(ws, 'batch:captchaDetected', {
+            browserId,
+            challengeType: 'bot_protection',
+            url: browser.page.url(),
+            jobId,
+          }, sessionId);
+
+          // Don't send error result - wait for user to solve
+          break;
+        }
 
         send(ws, 'batch:scrapeResult', {
           browserId,
@@ -2034,6 +2615,7 @@ async function handleMessage(
           items: result.items,
           count: result.items.length,
           error: result.errors?.[0],
+          jobId,
         }, sessionId);
 
       } catch (error) {
@@ -2048,7 +2630,169 @@ async function handleMessage(
           success: false,
           error: errorMsg,
           items: [],
+          jobId,
         }, sessionId);
+      } finally {
+        // CRITICAL: Mark browser as done AFTER scrape completes (success or failure)
+        // This allows the browser to be reused for the next job
+        batchPool.markDone(browserId);
+      }
+      break;
+    }
+
+    case 'batch:captchaSolved': {
+      const { browserId } = payload as { browserId: string };
+
+      // Stop the screencast for this browser
+      stopBatchScreencast(browserId);
+
+      if (!batchPool || batchPool.isShutdown()) {
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: false,
+          error: 'Pool not initialized or shutting down',
+          items: [],
+        }, sessionId);
+        // Mark browser as done even on early exit
+        batchPool?.markDone(browserId);
+        break;
+      }
+
+      const browser = batchPool.get(browserId);
+      if (!browser) {
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: false,
+          error: 'Browser not found',
+          items: [],
+        }, sessionId);
+        batchPool.markDone(browserId);
+        break;
+      }
+
+      // Get the pending job info
+      const pendingJob = batchPendingCaptchaJobs.get(browserId);
+      if (!pendingJob) {
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: false,
+          error: 'No pending captcha job found',
+          items: [],
+        }, sessionId);
+        batchPool.markDone(browserId);
+        break;
+      }
+
+      // Clear the pending job
+      batchPendingCaptchaJobs.delete(browserId);
+
+      try {
+        console.log(`[Server] Resuming batch scrape after captcha solve for ${pendingJob.url}`);
+
+        // Wait a moment for the page to settle after captcha solve
+        await browser.page.waitForTimeout(1000);
+
+        // Check if captcha is still present
+        const { CloudflareBypass } = await import('./browser/CloudflareBypass.js');
+        const captchaDetector = new CloudflareBypass(browser.page);
+        const stillHasCaptcha = await captchaDetector.detectChallenge();
+
+        if (stillHasCaptcha !== 'none') {
+          console.log(`[Server] Captcha still detected after solve attempt: ${stillHasCaptcha}`);
+          // Re-queue for captcha - browser stays marked as executing
+          batchPendingCaptchaJobs.set(browserId, pendingJob);
+          send(ws, 'batch:captchaDetected', {
+            browserId,
+            challengeType: stillHasCaptcha,
+            url: browser.page.url(),
+          }, sessionId);
+          // Don't mark as done - still waiting for captcha solve
+          break;
+        }
+
+        // Captcha solved - now scrape
+        const result = await executeScraperWithConfig(
+          browser.page,
+          browser.cdp,
+          pendingJob.configName,
+          pendingJob.url,
+          pendingJob.targetProducts
+        );
+
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: result.success,
+          items: result.items,
+          count: result.items.length,
+          error: result.errors?.[0],
+          captchaSolved: true,
+        }, sessionId);
+
+      } catch (error) {
+        console.error(`[Server] Scrape failed after captcha solve:`, error);
+        send(ws, 'batch:scrapeResult', {
+          browserId,
+          success: false,
+          error: error instanceof Error ? error.message : 'Scrape failed after captcha solve',
+          items: [],
+          captchaSolved: true,
+        }, sessionId);
+      } finally {
+        // Mark browser as done after captcha flow completes
+        batchPool.markDone(browserId);
+      }
+      break;
+    }
+
+    case 'batch:slotInput': {
+      // Handle user input on batch browser (for captcha solving)
+      const { browserId, inputType, data } = payload as {
+        browserId: string;
+        inputType: string;
+        data: { x?: number; y?: number; deltaY?: number };
+      };
+
+      if (!batchPool) break;
+
+      const targetBrowser = batchPool.get(browserId);
+      if (!targetBrowser) break;
+
+      try {
+        if (inputType === 'click' && typeof data.x === 'number' && typeof data.y === 'number') {
+          // Click coordinates are in screencast resolution (max 1280x720)
+          // Scale to actual viewport (1920x1080)
+          const viewport = targetBrowser.page.viewportSize() || { width: 1920, height: 1080 };
+          const screencastMaxWidth = 1280;
+          const screencastMaxHeight = 720;
+
+          // Calculate the actual screencast dimensions (maintains aspect ratio)
+          const viewportAspect = viewport.width / viewport.height;
+          const screencastAspect = screencastMaxWidth / screencastMaxHeight;
+          let screencastWidth: number, screencastHeight: number;
+
+          if (viewportAspect > screencastAspect) {
+            screencastWidth = screencastMaxWidth;
+            screencastHeight = screencastMaxWidth / viewportAspect;
+          } else {
+            screencastHeight = screencastMaxHeight;
+            screencastWidth = screencastMaxHeight * viewportAspect;
+          }
+
+          // Scale coordinates from screencast to viewport
+          const scaleX = viewport.width / screencastWidth;
+          const scaleY = viewport.height / screencastHeight;
+          const scaledX = Math.round(data.x * scaleX);
+          const scaledY = Math.round(data.y * scaleY);
+
+          await targetBrowser.page.mouse.click(scaledX, scaledY);
+          console.log(`[Server] Batch click at (${scaledX}, ${scaledY}) [from ${data.x}, ${data.y}] on browser ${browserId.substring(0, 8)}`);
+        } else if (inputType === 'scroll' && typeof data.deltaY === 'number') {
+          // Scroll
+          await targetBrowser.page.mouse.wheel(0, data.deltaY);
+          console.log(`[Server] Batch scroll by ${data.deltaY} on browser ${browserId.substring(0, 8)}`);
+        }
+      } catch (err) {
+        console.error(`[Server] Batch input error:`, err);
       }
       break;
     }
@@ -2064,6 +2808,64 @@ async function handleMessage(
       send(ws, 'batch:poolStats', {
         pool: stats,
       }, sessionId);
+      break;
+    }
+
+    // =========================================================================
+    // CLOUDFLARE BYPASS
+    // =========================================================================
+
+    case 'cloudflare:exportCookies': {
+      const currentSession = getSession(sessionId ?? null);
+      if (!currentSession) {
+        send(ws, 'cloudflare:cookiesExported', { success: false, error: 'No active session' }, sessionId);
+        break;
+      }
+
+      try {
+        const result = await browserManager.exportCloudflareCookies(currentSession.id);
+        const url = currentSession.browserSession.page.url();
+        let domain = 'unknown';
+        try {
+          domain = new URL(url).hostname.replace(/^www\./, '');
+        } catch {}
+
+        send(ws, 'cloudflare:cookiesExported', {
+          success: result.success,
+          cookieCount: result.cookieCount,
+          domain,
+        }, sessionId);
+
+        console.log(`[Server] Exported ${result.cookieCount} Cloudflare cookies for ${domain}`);
+      } catch (error) {
+        console.error('[Server] Cookie export failed:', error);
+        send(ws, 'cloudflare:cookiesExported', {
+          success: false,
+          error: error instanceof Error ? error.message : 'Export failed',
+        }, sessionId);
+      }
+      break;
+    }
+
+    case 'cloudflare:getStatus': {
+      const currentSession = getSession(sessionId ?? null);
+      if (!currentSession) {
+        send(ws, 'cloudflare:status', { error: 'No active session' }, sessionId);
+        break;
+      }
+
+      try {
+        const status = await browserManager.getCloudflareStatus(currentSession.id);
+        send(ws, 'cloudflare:status', status || { hasChallenge: false, challengeType: 'none', hasClearance: false }, sessionId);
+      } catch (error) {
+        console.error('[Server] Cloudflare status check failed:', error);
+        send(ws, 'cloudflare:status', {
+          hasChallenge: false,
+          challengeType: 'none',
+          hasClearance: false,
+          error: error instanceof Error ? error.message : 'Status check failed',
+        }, sessionId);
+      }
       break;
     }
 
@@ -2087,6 +2889,68 @@ function getSession(sessionId: string | null): ActiveSession | null {
     return null;
   }
   return session;
+}
+
+/**
+ * Start CDP screencast for a batch browser and stream frames to the client.
+ * Used when captcha is detected so user can see and solve it.
+ */
+async function startBatchScreencast(
+  ws: WebSocket,
+  browserId: string,
+  cdp: import('playwright').CDPSession,
+  sessionId?: string
+): Promise<void> {
+  // Stop any existing screencast for this browser
+  stopBatchScreencast(browserId);
+
+  console.log(`[Server] Starting batch screencast for browser ${browserId.substring(0, 8)}`);
+
+  // Set up frame handler
+  const frameHandler = (params: { data: string; metadata: { timestamp: number }; sessionId: number }) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    // CRITICAL: Acknowledge the frame so CDP continues sending frames
+    cdp.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
+
+    // Send frame as binary for efficiency
+    const frameBuffer = Buffer.from(params.data, 'base64');
+
+    // Prepend browser ID so client knows which slot this frame belongs to
+    const browserIdBuffer = Buffer.from(browserId + ':', 'utf8');
+    const combined = Buffer.concat([browserIdBuffer, frameBuffer]);
+
+    ws.send(combined);
+  };
+
+  cdp.on('Page.screencastFrame', frameHandler);
+
+  // Start screencast
+  await cdp.send('Page.startScreencast', {
+    format: 'jpeg',
+    quality: 60,
+    maxWidth: 1280,
+    maxHeight: 720,
+    everyNthFrame: 2,
+  });
+
+  // Store cleanup function
+  batchScreencasts.set(browserId, () => {
+    cdp.off('Page.screencastFrame', frameHandler);
+    cdp.send('Page.stopScreencast').catch(() => {});
+  });
+}
+
+/**
+ * Stop screencast for a batch browser.
+ */
+function stopBatchScreencast(browserId: string): void {
+  const cleanup = batchScreencasts.get(browserId);
+  if (cleanup) {
+    console.log(`[Server] Stopping batch screencast for browser ${browserId.substring(0, 8)}`);
+    cleanup();
+    batchScreencasts.delete(browserId);
+  }
 }
 
 function send(ws: WebSocket, type: string, payload: unknown, sessionId?: string): void {

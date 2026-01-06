@@ -9,29 +9,37 @@ export function BrowserSlot({ slot, onClick }: BrowserSlotProps) {
   const statusColors: Record<string, string> = {
     idle: 'var(--text-secondary)',
     loading: 'var(--accent-warning)',
+    scraping: 'var(--accent-success)',
     running: 'var(--accent-success)',
+    captcha: 'var(--accent-warning)',
     error: 'var(--accent-danger)',
   };
 
   const statusLabels: Record<string, string> = {
     idle: 'Idle',
     loading: 'Loading...',
+    scraping: 'Scraping',
     running: 'Running',
+    captcha: 'CAPTCHA',
     error: 'Error',
   };
+
+  const isCaptchaMode = slot.status === 'captcha';
 
   return (
     <div
       onClick={onClick}
       style={{
         background: 'var(--bg-card)',
-        border: '1px solid var(--border-color)',
+        border: isCaptchaMode ? '2px solid var(--accent-warning)' : '1px solid var(--border-color)',
         overflow: 'hidden',
         cursor: 'pointer',
-        transition: 'border-color 0.2s',
+        transition: 'border-color 0.2s, box-shadow 0.2s',
+        boxShadow: isCaptchaMode ? '0 0 10px rgba(255, 165, 0, 0.4)' : 'none',
+        position: 'relative',
       }}
-      onMouseOver={(e) => (e.currentTarget.style.borderColor = 'var(--accent-color)')}
-      onMouseOut={(e) => (e.currentTarget.style.borderColor = 'var(--border-color)')}
+      onMouseOver={(e) => (e.currentTarget.style.borderColor = isCaptchaMode ? 'var(--accent-warning)' : 'var(--accent-color)')}
+      onMouseOut={(e) => (e.currentTarget.style.borderColor = isCaptchaMode ? 'var(--accent-warning)' : 'var(--border-color)')}
     >
       {/* Slot Header */}
       <div
@@ -68,6 +76,7 @@ export function BrowserSlot({ slot, onClick }: BrowserSlotProps) {
           alignItems: 'center',
           justifyContent: 'center',
           overflow: 'hidden',
+          position: 'relative',
         }}
       >
         {slot.frameData ? (
@@ -80,6 +89,28 @@ export function BrowserSlot({ slot, onClick }: BrowserSlotProps) {
           <span style={{ color: 'var(--text-secondary)', fontSize: '0.75em' }}>
             {slot.status === 'idle' ? 'Waiting...' : 'Loading...'}
           </span>
+        )}
+
+        {/* Captcha overlay indicator */}
+        {isCaptchaMode && (
+          <div
+            style={{
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
+              background: 'rgba(255, 165, 0, 0.9)',
+              color: 'white',
+              padding: '6px 8px',
+              fontSize: '0.7em',
+              fontWeight: 600,
+              textAlign: 'center',
+              textTransform: 'uppercase',
+              letterSpacing: '0.5px',
+            }}
+          >
+            Click to solve CAPTCHA
+          </div>
         )}
       </div>
 

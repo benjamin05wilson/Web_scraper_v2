@@ -11,6 +11,7 @@ import type {
   ScraperConfig,
   ScrapeResult,
   ExtractedContentItem,
+  CloudflareStatus,
 } from '../../shared/types';
 
 interface SidebarProps {
@@ -66,6 +67,12 @@ interface SidebarProps {
   autoDetectProduct?: () => void;
   isAutoDetecting?: boolean;
   sessionId?: string | null;
+
+  // Cloudflare bypass
+  cloudflareStatus?: CloudflareStatus | null;
+  onExportCloudflareCookies?: () => void;
+  onRefreshCloudflareStatus?: () => void;
+  isExportingCookies?: boolean;
 }
 
 // Simple, friendly labels for each data type we can grab
@@ -114,6 +121,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   autoDetectProduct,
   isAutoDetecting,
   sessionId,
+  cloudflareStatus,
+  onExportCloudflareCookies,
+  onRefreshCloudflareStatus,
+  isExportingCookies,
 }) => {
   const [expandedPanels, setExpandedPanels] = useState({
     selectors: true,
@@ -388,6 +399,90 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
           </div>
         </div>
+
+        {/* Cloudflare Bypass Panel */}
+        {(cloudflareStatus?.hasChallenge || onExportCloudflareCookies) && (
+          <div className="panel" style={{ border: cloudflareStatus?.hasChallenge ? '2px solid var(--accent-danger)' : '1px solid var(--border-color)' }}>
+            <div className="panel-header" style={{
+              background: cloudflareStatus?.hasChallenge ? 'rgba(244, 67, 54, 0.1)' : 'var(--bg-secondary)',
+            }}>
+              <span className="panel-title">
+                🛡️ Cloudflare Protection {cloudflareStatus?.hasChallenge && '⚠️'}
+              </span>
+            </div>
+            <div className="panel-content">
+              {cloudflareStatus?.hasChallenge ? (
+                <div style={{
+                  padding: 12,
+                  background: 'rgba(244, 67, 54, 0.1)',
+                  borderRadius: 8,
+                  border: '1px solid var(--accent-danger)',
+                  marginBottom: 12
+                }}>
+                  <p style={{ fontSize: 13, color: 'var(--text-primary)', margin: 0 }}>
+                    <strong>🔒 Cloudflare Challenge Detected!</strong><br/>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                      Solve the captcha in the browser, then click "Save Cookies" to bypass it in future sessions.
+                    </span>
+                  </p>
+                </div>
+              ) : cloudflareStatus?.hasClearance ? (
+                <div style={{
+                  padding: 12,
+                  background: 'rgba(76, 175, 80, 0.1)',
+                  borderRadius: 8,
+                  border: '1px solid var(--accent-success)',
+                  marginBottom: 12
+                }}>
+                  <p style={{ fontSize: 13, color: 'var(--text-primary)', margin: 0 }}>
+                    <strong>✅ Cloudflare Passed</strong><br/>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                      You have valid clearance cookies.
+                    </span>
+                  </p>
+                </div>
+              ) : (
+                <div style={{
+                  padding: 12,
+                  background: 'rgba(255, 193, 7, 0.1)',
+                  borderRadius: 8,
+                  border: '1px solid var(--accent-warning)',
+                  marginBottom: 12
+                }}>
+                  <p style={{ fontSize: 13, color: 'var(--text-primary)', margin: 0 }}>
+                    <strong>💡 Cloudflare Bypass</strong><br/>
+                    <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                      If this site uses Cloudflare, solve the captcha once then save cookies for batch scraping.
+                    </span>
+                  </p>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 8 }}>
+                {onExportCloudflareCookies && (
+                  <button
+                    className="btn btn-primary"
+                    onClick={onExportCloudflareCookies}
+                    disabled={isExportingCookies}
+                    style={{ flex: 1, padding: '10px 12px', fontSize: 13, borderRadius: 8 }}
+                  >
+                    {isExportingCookies ? '💾 Saving...' : '💾 Save Cookies'}
+                  </button>
+                )}
+                {onRefreshCloudflareStatus && (
+                  <button
+                    className="btn"
+                    onClick={onRefreshCloudflareStatus}
+                    style={{ padding: '10px 12px', fontSize: 13, borderRadius: 8 }}
+                    title="Refresh Cloudflare status"
+                  >
+                    🔄
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Element Selection Wizard - Super Simple */}
         {selectionMode && (

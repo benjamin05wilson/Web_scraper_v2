@@ -2,8 +2,8 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { useBrowserSession } from '../../hooks/useBrowserSession';
-import { useAutomatedBuilderFlow } from '../../hooks/useAutomatedBuilderFlow';
-import { ExtractedContentLabeler } from './ExtractedContentLabeler';
+import { useAutomatedBuilderFlow, ConfirmedField } from '../../hooks/useAutomatedBuilderFlow';
+// ExtractedContentLabeler removed - using wizard-based flow instead
 import { PopupDetectionPanel } from './PopupDetectionPanel';
 import { AutomatedBuilderOverlay } from './AutomatedBuilderOverlay';
 import { SelectedDataSummary } from './SelectedDataSummary';
@@ -12,15 +12,8 @@ import { createLogEntry, LogEntry } from './ActivityLog';
 import { PriceFormatModal } from './PriceFormatModal';
 import { CountrySelect } from '../common/CountrySelect';
 import { StatusIndicator } from '../common/StatusIndicator';
+import { FieldConfirmationWizard, WizardStep } from './FieldConfirmationWizard';
 import type { WSMessageType, NetworkExtractionConfig } from '../../../shared/types';
-
-type FieldType = 'Title' | 'Price' | 'URL' | 'NextPage' | 'Image';
-type LabelerFieldType = FieldType | 'Skip';
-
-interface LabeledItem {
-  field: LabelerFieldType;
-  item: ExtractedItem;
-}
 
 interface SelectedItem {
   text?: string;
@@ -31,12 +24,17 @@ interface SelectedItem {
   tagName?: string;
 }
 
-interface SelectedData {
+interface ProductSelectors {
   Title: SelectedItem[];
   Price: SelectedItem[];
   URL: SelectedItem[];
-  NextPage: SelectedItem[];
   Image: SelectedItem[];
+}
+
+interface SelectedData {
+  saleProduct: ProductSelectors;
+  nonSaleProduct: ProductSelectors;
+  NextPage: SelectedItem[];  // Shared - pagination is the same for all products
 }
 
 interface ExtractedItem {
@@ -78,7 +76,6 @@ export function BuilderPage() {
     toggleSelectionMode,
     autoDetectProduct,
     isAutoDetecting,
-    aiLabels,
   } = session;
 
   // Automated builder flow state machine
@@ -97,6 +94,7 @@ export function BuilderPage() {
   const [url, setUrl] = useState('');
   const [status, setStatus] = useState<'idle' | 'active' | 'loading' | 'error'>('idle');
   const [statusText, setStatusText] = useState('Ready to start');
+  // Real Chrome mode is now always enabled - no user toggle needed
 
   // Frame state for browser view
   const [frameData, setFrameData] = useState<string | null>(null);
@@ -106,19 +104,25 @@ export function BuilderPage() {
   // Mode state
   const [modeBadge, setModeBadge] = useState<'Browse' | 'SELECTING' | 'DISMISS'>('Browse');
 
-  // Container extraction state - for card-based labeling
-  const [extractedItems, setExtractedItems] = useState<ExtractedItem[]>([]);
+  // Container selector state
   const [containerSelector, setContainerSelector] = useState<string>('');
-  const [showLabeler, setShowLabeler] = useState(false);
   const lastExtractedSelectorRef = useRef<string>('');
 
-  // Selection state
+  // Selection state - separate sections for sale and non-sale products
   const [selectedData, setSelectedData] = useState<SelectedData>({
-    Title: [],
-    Price: [],
-    URL: [],
+    saleProduct: {
+      Title: [],
+      Price: [],
+      URL: [],
+      Image: [],
+    },
+    nonSaleProduct: {
+      Title: [],
+      Price: [],
+      URL: [],
+      Image: [],
+    },
     NextPage: [],
-    Image: [],
   });
   const [dismissMode, setDismissMode] = useState(false);
 
@@ -199,6 +203,7 @@ export function BuilderPage() {
 
   useEffect(() => {
     // Process when extractedContent changes and has items
+    // This is used by the wizard flow now - just log for debugging
     if (extractedContent && extractedContent.length > 0) {
       console.log('[BuilderPage] Extracted content received:', extractedContent.length, 'items');
       console.log('[BuilderPage] Item types:', extractedContent.map(i => `${i.type}:${i.value?.substring(0, 50)}`));
@@ -214,24 +219,7 @@ export function BuilderPage() {
         return;
       }
 
-      // Filter out very short text items (likely just labels or icons)
-      const filteredContent = (extractedContent as ExtractedItem[]).filter((item) => {
-        // Keep all links and images
-        if (item.type === 'link' || item.type === 'image') return true;
-        // For text, filter out very short items (less than 2 chars) unless they look like prices
-        if (item.type === 'text') {
-          const value = item.value?.trim() || '';
-          // Keep if it looks like a price (has currency symbol or numbers with decimal)
-          if (/[$£€¥₹]|^\d+[.,]\d{2}$|^\d+$/.test(value)) return true;
-          // Keep if at least 2 characters
-          return value.length >= 2;
-        }
-        return true;
-      });
-
-      setExtractedItems(filteredContent);
-      setShowLabeler(true);
-      addLog(`Extracted ${filteredContent.length} items from container`, 'success');
+      addLog(`Extracted ${extractedContent.length} items from container`, 'success');
     }
   }, [extractedContent, addLog]);
 
@@ -298,11 +286,12 @@ export function BuilderPage() {
       viewportHeight = Math.round(rect.height) || 720;
     }
 
-    addLog('Opening browser...');
+    addLog('Connecting to Real Chrome...');
     flow.startBrowser();
     session.createSession({
       url,
       viewport: { width: viewportWidth, height: viewportHeight },
+      useRealChrome: true, // Always use Real Chrome
     });
 
     setTimeout(() => {
@@ -319,7 +308,11 @@ export function BuilderPage() {
     setFrameData(null);
     setDismissMode(false);
     setModeBadge('Browse');
-    setSelectedData({ Title: [], Price: [], URL: [], NextPage: [], Image: [] });
+    setSelectedData({
+      saleProduct: { Title: [], Price: [], URL: [], Image: [] },
+      nonSaleProduct: { Title: [], Price: [], URL: [], Image: [] },
+      NextPage: [],
+    });
     setExtractedItems([]);
     setContainerSelector('');
     setShowLabeler(false);
@@ -423,12 +416,17 @@ export function BuilderPage() {
     if (!img || !sessionId) return;
 
     const handleDemoClick = (e: MouseEvent) => {
+      // Prevent regular click handler from also firing
+      e.stopPropagation();
+      e.preventDefault();
+
       const rect = img.getBoundingClientRect();
       const scaleX = img.naturalWidth / rect.width;
       const scaleY = img.naturalHeight / rect.height;
       const x = Math.round((e.clientX - rect.left) * scaleX);
       const y = Math.round((e.clientY - rect.top) * scaleY);
 
+      console.log(`[BuilderPage] Demo click at (${x}, ${y}), scale: ${scaleX.toFixed(2)}x${scaleY.toFixed(2)}`);
       send('pagination:demoClick', { x, y }, sessionId);
     };
 
@@ -465,67 +463,42 @@ export function BuilderPage() {
     }
   }, [selectedElement, extractContainerContent, addLog]);
 
-  // Handle labels from the ExtractedContentLabeler
-  const handleSaveLabels = useCallback(
-    (labels: LabeledItem[], container: string) => {
-      // Filter out 'Skip' items and process the rest
-      const validLabels = labels.filter((l): l is LabeledItem & { field: FieldType } => l.field !== 'Skip');
-
-      validLabels.forEach(({ field, item }) => {
-        const selectedItem: SelectedItem = {
-          text: item.type === 'text' ? item.value : undefined,
-          href: item.type === 'link' ? item.value : undefined,
-          src: item.type === 'image' ? item.value : undefined,
-          selector: item.selector,
-          tagName: item.tagName,
-        };
-
-        setSelectedData((prev) => ({
-          ...prev,
-          [field]: [...prev[field], selectedItem],
-        }));
-
-        addLog(`[${field}] ${item.displayText}`, 'selected');
-      });
-
-      setShowLabeler(false);
-      setExtractedItems([]);
-      lastExtractedSelectorRef.current = '';
-      addLog(`Applied ${validLabels.length} labels from container`);
-
-      // Proceed to pagination demo with the container selector
-      // This will be used to count products during demo mode
-      flow.proceedToPaginationDemo(container);
-    },
-    [addLog, flow]
-  );
-
-  // Cancel labeling
-  const handleCancelLabeling = useCallback(() => {
-    setShowLabeler(false);
-    setExtractedItems([]);
-    lastExtractedSelectorRef.current = '';
-    addLog('Labeling cancelled');
-  }, [addLog]);
-
-  // Remove selection
+  // Remove selection - handles both saleProduct and nonSaleProduct sections
   const handleRemoveSelection = useCallback(
-    (field: keyof SelectedData, index: number) => {
+    (productType: 'saleProduct' | 'nonSaleProduct' | null, field: string, index: number) => {
       setSelectedData((prev) => {
-        const newData = { ...prev };
-        newData[field] = [...prev[field]];
-        newData[field].splice(index, 1);
-        return newData;
+        if (productType === 'saleProduct' || productType === 'nonSaleProduct') {
+          // Remove from specific product type section
+          const section = prev[productType];
+          const fieldKey = field as keyof ProductSelectors;
+          if (section && section[fieldKey]) {
+            const newSection = { ...section };
+            newSection[fieldKey] = [...section[fieldKey]];
+            newSection[fieldKey].splice(index, 1);
+            return { ...prev, [productType]: newSection };
+          }
+        } else if (field === 'NextPage') {
+          // Handle NextPage (shared)
+          const newNextPage = [...prev.NextPage];
+          newNextPage.splice(index, 1);
+          return { ...prev, NextPage: newNextPage };
+        }
+        return prev;
       });
 
-      addLog(`Removed [${field}] selection`);
+      const label = productType ? `${productType === 'saleProduct' ? 'Sale' : 'Non-Sale'}: ${field}` : field;
+      addLog(`Removed [${label}] selection`);
     },
     [addLog]
   );
 
   // Clear all selections
   const handleClearSelections = useCallback(() => {
-    setSelectedData({ Title: [], Price: [], URL: [], NextPage: [], Image: [] });
+    setSelectedData({
+      saleProduct: { Title: [], Price: [], URL: [], Image: [] },
+      nonSaleProduct: { Title: [], Price: [], URL: [], Image: [] },
+      NextPage: [],
+    });
     flow.reset();
     setExtractedItems([]);
     setShowLabeler(false);
@@ -598,20 +571,40 @@ export function BuilderPage() {
   const completeSave = useCallback(
     async (filename: string, priceFormat: PriceFormat | null) => {
       try {
-        // Convert selectedData to selectors format expected by the scraper
-        // selectedData has: { Title: SelectedItem[], Price: SelectedItem[], URL: SelectedItem[], ... }
-        // We need: { Title: string[], Price: string[], URL: string[], ... } (CSS selectors)
-        const selectors: Record<string, string[]> = {};
+        // Convert selectedData to new selectors format with saleProduct and nonSaleProduct sections
+        // selectedData has: { saleProduct: {...}, nonSaleProduct: {...}, NextPage: [...] }
+        // We need: { saleProduct: { Title: string[], ... }, nonSaleProduct: { Title: string[], ... } }
+        const selectors: {
+          saleProduct: Record<string, string[]>;
+          nonSaleProduct: Record<string, string[]>;
+        } = {
+          saleProduct: {},
+          nonSaleProduct: {},
+        };
 
-        for (const [field, items] of Object.entries(selectedData)) {
+        // Helper function to extract CSS selectors from items
+        const extractSelectors = (items: SelectedItem[]): string[] => {
+          return items
+            .map((item) => item.selector)
+            .filter((s): s is string => !!s);
+        };
+
+        // Process saleProduct selectors
+        for (const [field, items] of Object.entries(selectedData.saleProduct)) {
           if (items.length > 0) {
-            // Extract the CSS selector from each item
-            const cssSelectors = items
-              .map((item: SelectedItem) => item.selector)
-              .filter((s: string | undefined): s is string => !!s);
-
+            const cssSelectors = extractSelectors(items);
             if (cssSelectors.length > 0) {
-              selectors[field] = cssSelectors;
+              selectors.saleProduct[field] = cssSelectors;
+            }
+          }
+        }
+
+        // Process nonSaleProduct selectors
+        for (const [field, items] of Object.entries(selectedData.nonSaleProduct)) {
+          if (items.length > 0) {
+            const cssSelectors = extractSelectors(items);
+            if (cssSelectors.length > 0) {
+              selectors.nonSaleProduct[field] = cssSelectors;
             }
           }
         }
@@ -621,7 +614,7 @@ export function BuilderPage() {
           competitor_type: competitorType,
           country,
           url, // Save the base URL
-          selectors, // Save the selectors!
+          selectors, // Save the selectors with saleProduct/nonSaleProduct structure!
         };
 
         // Also save the container selector if we have one
@@ -700,10 +693,113 @@ export function BuilderPage() {
 
   const isBrowserOpen = sessionId !== null;
 
+  // Handle SALE wizard completion - store in saleProduct section
+  const handleWizardComplete = useCallback(
+    (fields: ConfirmedField[]) => {
+      // Convert confirmed fields to saleProduct section
+      fields.forEach((field) => {
+        if (!field.confirmed) return;
+
+        const selectedItem: SelectedItem = {
+          text: field.field !== 'URL' && field.field !== 'Image' ? field.value : undefined,
+          href: field.field === 'URL' ? field.value : undefined,
+          src: field.field === 'Image' ? field.value : undefined,
+          selector: field.selector,
+        };
+
+        // Map "Sale Price" → "Price" for saleProduct section
+        const fieldName = field.field === 'Sale Price' ? 'Price' : field.field;
+
+        // Store in saleProduct section
+        if (fieldName === 'Title' || fieldName === 'Price' || fieldName === 'URL' || fieldName === 'Image') {
+          setSelectedData((prev) => ({
+            ...prev,
+            saleProduct: {
+              ...prev.saleProduct,
+              [fieldName]: [...prev.saleProduct[fieldName as keyof ProductSelectors], selectedItem],
+            },
+          }));
+        }
+
+        addLog(`[Sale: ${fieldName}] ${field.value.substring(0, 50)}${field.value.length > 50 ? '...' : ''}`, 'selected');
+      });
+
+      // Auto-detected fields (like RRP) are ignored for sale products
+      // We only care about the sale price for sale products
+
+      // Store the container selector for pagination demo
+      if (flow.detectedProduct?.css) {
+        setContainerSelector(flow.detectedProduct.css);
+      }
+
+      // Proceed with wizard completion
+      flow.handleWizardComplete(fields);
+    },
+    [addLog, flow]
+  );
+
+  // Handle NON-SALE wizard completion - store in nonSaleProduct section
+  const handleNonSaleWizardComplete = useCallback(
+    (fields: ConfirmedField[]) => {
+      // Convert confirmed fields to nonSaleProduct section
+      fields.forEach((field) => {
+        if (!field.confirmed) return;
+
+        const selectedItem: SelectedItem = {
+          text: field.field !== 'URL' && field.field !== 'Image' ? field.value : undefined,
+          href: field.field === 'URL' ? field.value : undefined,
+          src: field.field === 'Image' ? field.value : undefined,
+          selector: field.selector,
+        };
+
+        // Map "RRP" → "Price" for nonSaleProduct section
+        const fieldName = field.field === 'RRP' ? 'Price' : field.field;
+
+        // Store in nonSaleProduct section
+        if (fieldName === 'Title' || fieldName === 'Price' || fieldName === 'URL' || fieldName === 'Image') {
+          setSelectedData((prev) => ({
+            ...prev,
+            nonSaleProduct: {
+              ...prev.nonSaleProduct,
+              [fieldName]: [...prev.nonSaleProduct[fieldName as keyof ProductSelectors], selectedItem],
+            },
+          }));
+        }
+
+        addLog(`[Non-Sale: ${fieldName}] ${field.value.substring(0, 50)}${field.value.length > 50 ? '...' : ''}`, 'selected');
+      });
+
+      // Proceed with flow handler
+      flow.handleNonSaleWizardComplete(fields);
+    },
+    [addLog, flow]
+  );
+
+  // Handle wizard pick different - switch to manual labeling for specific field
+  const handleWizardPickDifferent = useCallback(
+    (field: 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'Image') => {
+      addLog(`Switching to manual labeling for: ${field}`);
+      // Trigger content extraction for manual labeling
+      if (flow.detectedProduct?.css && flow.detectedProduct.css !== lastExtractedSelectorRef.current) {
+        lastExtractedSelectorRef.current = flow.detectedProduct.css;
+        setContainerSelector(flow.detectedProduct.css);
+        extractContainerContent(flow.detectedProduct.css);
+      }
+      flow.handleWizardPickDifferent(field);
+    },
+    [addLog, flow, extractContainerContent]
+  );
+
   // Determine which panels to show based on flow state
   const showPopupPanel = flow.state === 'POPUP_RECORDING';
   const showProductSelection = ['MANUAL_PRODUCT_SELECT', 'PRODUCT_CONFIRMATION', 'AUTO_DETECTING_PRODUCT'].includes(flow.state);
-  const showLabelingPanel = flow.state === 'LABELING' || showLabeler;
+  const showFieldWizard = flow.state === 'FIELD_CONFIRMATION' && flow.wizardSteps.length > 0;
+  // NEW: Show non-sale wizard for both immediate (before pagination) and post-pagination states
+  const showNonSaleFieldWizard = (
+    flow.state === 'NON_SALE_FIELD_CONFIRMATION' ||
+    flow.state === 'NON_SALE_WIZARD_IMMEDIATE'
+  ) && flow.nonSaleWizardSteps.length > 0;
+  const showGeneratingWizard = flow.state === 'GENERATING_WIZARD' || flow.state === 'GENERATING_NON_SALE_WIZARD';
   // Only show full pagination panel for manual configuration
   const showPaginationPanel = flow.state === 'PAGINATION_MANUAL';
   const showFinalConfig = ['FINAL_CONFIG', 'SAVING', 'COMPLETE'].includes(flow.state);
@@ -731,7 +827,28 @@ export function BuilderPage() {
         demoResult={flow.demoResult}
         onRetryDemo={flow.retryDemo}
         onSkipPagination={flow.skipPagination}
+        captchaType={flow.captchaType}
       />
+
+      {/* Field Confirmation Wizard (Sale Products - before pagination) */}
+      {showFieldWizard && (
+        <FieldConfirmationWizard
+          steps={flow.wizardSteps as WizardStep[]}
+          onComplete={handleWizardComplete}
+          onCancel={flow.handleWizardCancel}
+          onPickDifferent={handleWizardPickDifferent}
+        />
+      )}
+
+      {/* Non-Sale Field Confirmation Wizard (before or after pagination) */}
+      {showNonSaleFieldWizard && (
+        <FieldConfirmationWizard
+          steps={flow.nonSaleWizardSteps as WizardStep[]}
+          onComplete={handleNonSaleWizardComplete}
+          onCancel={flow.handleNonSaleWizardSkip}
+          onPickDifferent={handleWizardPickDifferent}
+        />
+      )}
 
       <div style={{ padding: '0 20px', maxWidth: '100%' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: '20px', marginBottom: '30px', alignItems: 'start' }}>
@@ -750,6 +867,30 @@ export function BuilderPage() {
                   disabled={isBrowserOpen}
                 />
               </div>
+              {/* Browser mode indicator */}
+              {!isBrowserOpen && (
+                <div style={{
+                  background: 'var(--bg-secondary)',
+                  border: '1px solid var(--accent-success)',
+                  padding: '10px 12px',
+                  fontSize: '12px',
+                  marginBottom: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}>
+                  <span style={{
+                    width: '8px',
+                    height: '8px',
+                    borderRadius: '50%',
+                    background: 'var(--accent-success)',
+                    display: 'inline-block',
+                  }} />
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    <strong style={{ color: 'var(--accent-success)' }}>Real Chrome Mode</strong> - Uses your actual Chrome browser for best compatibility with Zalora, protected sites, etc.
+                  </span>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: '10px' }}>
                 <button
                   className="btn-large"
@@ -803,15 +944,21 @@ export function BuilderPage() {
               </div>
             )}
 
-            {/* Extracted Content Labeler - shows when container is selected */}
-            {showLabelingPanel && extractedItems.length > 0 && (
-              <ExtractedContentLabeler
-                items={extractedItems}
-                containerSelector={containerSelector}
-                onSaveLabels={handleSaveLabels}
-                onCancel={handleCancelLabeling}
-                aiLabels={aiLabels}
-              />
+            {/* Generating Wizard Status - shows while preparing wizard steps */}
+            {showGeneratingWizard && (
+              <div className="step-card">
+                <h2 className="step-title">
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
+                      <circle cx="12" cy="12" r="10" strokeDasharray="31.4 31.4" strokeDashoffset="10" />
+                    </svg>
+                    Preparing Field Wizard
+                  </span>
+                </h2>
+                <p style={{ color: 'var(--text-secondary)' }}>
+                  Analyzing product cards and preparing visual confirmation...
+                </p>
+              </div>
             )}
 
             {/* Selected Data Summary */}
