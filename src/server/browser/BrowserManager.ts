@@ -273,12 +273,26 @@ export class BrowserManager extends EventEmitter {
     const path = await import('path');
     const os = await import('os');
 
-    // Common Chrome paths on Windows
-    const chromePaths = [
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-      path.join(os.homedir(), 'AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'),
-    ];
+    // Common Chrome paths by platform
+    const chromePaths = process.platform === 'win32'
+      ? [
+          'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+          'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+          path.join(os.homedir(), 'AppData\\Local\\Google\\Chrome\\Application\\chrome.exe'),
+        ]
+      : process.platform === 'darwin'
+        ? [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            path.join(os.homedir(), 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+          ]
+        : [
+            // Linux paths
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/snap/bin/chromium',
+          ];
 
     // Find Chrome
     let chromePath: string | null = null;
