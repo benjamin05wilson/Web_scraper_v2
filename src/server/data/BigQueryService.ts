@@ -410,7 +410,8 @@ export class BigQueryService {
       }
 
       // First get count of rows to delete
-      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      // BigQuery requires WHERE clause for DELETE, use WHERE TRUE to delete all
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : 'WHERE TRUE';
       const countQuery = `SELECT COUNT(*) as count FROM ${this.getTableRef()} ${whereClause}`;
       const [countResult] = await this.client.query({ query: countQuery, params });
       const countToDelete = parseInt(countResult[0]?.count || '0', 10);

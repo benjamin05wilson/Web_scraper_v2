@@ -415,6 +415,46 @@ export class BrowserPool extends EventEmitter {
     // Set viewport explicitly - critical for click handling in Real Chrome
     await page.setViewportSize({ width: 1920, height: 1080 });
 
+    // Hide automation flags for Real Chrome (stealth plugin doesn't apply to CDP connections)
+    // This is critical for captcha/Turnstile to work properly
+    // Using string-based script to avoid TypeScript __name decorator issues
+    await page.addInitScript(`
+      (function() {
+        // Hide webdriver property
+        Object.defineProperty(navigator, 'webdriver', {
+          get: function() { return undefined; },
+          configurable: true,
+        });
+
+        // Override permissions query for notifications
+        var originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
+        window.navigator.permissions.query = function(parameters) {
+          if (parameters.name === 'notifications') {
+            return Promise.resolve({ state: Notification.permission });
+          }
+          return originalQuery(parameters);
+        };
+
+        // Add plugins (Chrome normally has these)
+        Object.defineProperty(navigator, 'plugins', {
+          get: function() {
+            return [
+              { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+              { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+              { name: 'Native Client', filename: 'internal-nacl-plugin' },
+            ];
+          },
+          configurable: true,
+        });
+
+        // Add languages
+        Object.defineProperty(navigator, 'languages', {
+          get: function() { return ['en-GB', 'en-US', 'en']; },
+          configurable: true,
+        });
+      })();
+    `);
+
     const cdp = await context.newCDPSession(page);
 
     // Enable CDP domains
