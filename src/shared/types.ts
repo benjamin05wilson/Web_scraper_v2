@@ -514,6 +514,7 @@ export interface Config {
     count: number;
   };
   country?: string;
+  category?: string;
   competitor_type?: 'local' | 'global';
   created_at?: string;
   updated_at?: string;

@@ -205,12 +205,34 @@ export function ScraperPage() {
   // Save products to BigQuery
   const saveProductsToBigQuery = async (products: ScrapedProduct[]) => {
     try {
+      // Extract domain from current URL
+      let domain: string | undefined;
+      const scrapeUrl = currentUrl || url;
+      if (scrapeUrl) {
+        try {
+          domain = new URL(scrapeUrl).hostname.replace('www.', '');
+        } catch {
+          // Invalid URL, domain stays undefined
+        }
+      }
+
+      // Get config details if available
+      const config = configs.find(c => c.name === selectedConfig);
+      const country = config?.country;
+      const category = config?.category;
+      const competitorType = config?.competitor_type;
+
       const response = await fetch('/api/products/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           products,
-          scrape_type: 'single',
+          scrape_type: competitorType || 'single',
+          domain,
+          country,
+          category,
+          source_url: scrapeUrl,
+          config_name: selectedConfig,
         }),
       });
 

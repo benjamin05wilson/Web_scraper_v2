@@ -28,6 +28,7 @@ import { NetworkInterceptor, type NetworkInterceptorConfig } from './scraper/han
 import { getGeminiService } from './ai/GeminiService.js';
 import { BrowserPool } from './browser/BrowserPool.js';
 import { getConfigCache, resetConfigCache } from './config/ConfigCache.js';
+import { getBigQueryService } from './data/BigQueryService.js';
 import type { Page, CDPSession } from 'playwright';
 
 import type {
@@ -246,6 +247,125 @@ app.delete('/api/configs/:name', (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete config' });
+  }
+});
+
+// ============================================================================
+// PRODUCTS / REPORTS ENDPOINTS (BigQuery)
+// ============================================================================
+
+// Get products with filters and pagination
+app.get('/api/products', async (req, res) => {
+  try {
+    const bq = getBigQueryService();
+
+    if (!bq.isEnabled) {
+      return res.status(503).json({ error: 'BigQuery service is not configured' });
+    }
+
+    const filters = {
+      page: parseInt(req.query.page as string) || 1,
+      pageSize: Math.min(parseInt(req.query.pageSize as string) || 50, 200),
+      country: req.query.country as string | undefined,
+      domain: req.query.domain as string | undefined,
+      category: req.query.category as string | undefined,
+      search: req.query.search as string | undefined,
+      startDate: req.query.startDate as string | undefined,
+      endDate: req.query.endDate as string | undefined,
+    };
+
+    const result = await bq.queryProducts(filters);
+    res.json(result);
+  } catch (error) {
+    console.error('[API] GET /api/products error:', error);
+    res.status(500).json({ error: 'Failed to fetch products' });
+  }
+});
+
+// Get product statistics summary
+app.get('/api/products/summary', async (req, res) => {
+  try {
+    const bq = getBigQueryService();
+
+    if (!bq.isEnabled) {
+      return res.json({
+        total_products: 0,
+        country_count: 0,
+        domain_count: 0,
+        category_count: 0,
+        countries: [],
+        domains: [],
+        categories: [],
+      });
+    }
+
+    const stats = await bq.getProductStats();
+    res.json(stats);
+  } catch (error) {
+    console.error('[API] GET /api/products/summary error:', error);
+    res.status(500).json({ error: 'Failed to fetch summary' });
+  }
+});
+
+// Save products to BigQuery
+app.post('/api/products/save', async (req, res) => {
+  try {
+    const bq = getBigQueryService();
+
+    if (!bq.isEnabled) {
+      return res.status(503).json({ error: 'BigQuery service is not configured' });
+    }
+
+    const { products, scrape_type, country, domain, category, source_url } = req.body;
+
+    if (!products || !Array.isArray(products)) {
+      return res.status(400).json({ error: 'products array required' });
+    }
+
+    // Transform scraped items to Product format
+    const productRecords = products.map((item: any) => ({
+      item_name: item.title || item.item_name || '',
+      brand: item.brand || null,
+      price: item.price != null ? parseFloat(String(item.price).replace(/[^0-9.-]/g, '')) || null : null,
+      price_raw: item.price_raw || item.price?.toString() || null,
+      original_price: item.original_price != null ? parseFloat(String(item.original_price).replace(/[^0-9.-]/g, '')) || null : null,
+      currency: item.currency || 'GBP',
+      domain: item.domain || domain || null,
+      category: item.category || category || null,
+      country: item.country || country || null,
+      competitor_type: item.competitor_type || scrape_type || null,
+      product_url: item.url || item.product_url || null,
+      image_url: item.image || item.image_url || null,
+      source_url: item.source_url || source_url || null,
+      scraped_at: new Date().toISOString(),
+    }));
+
+    const result = await bq.insertProducts(productRecords);
+    console.log(`[API] Saved ${result.count} products to BigQuery`);
+    res.json({ success: true, count: result.count, scrape_type });
+  } catch (error) {
+    console.error('[API] POST /api/products/save error:', error);
+    res.status(500).json({ error: 'Failed to save products' });
+  }
+});
+
+// Clear/delete products from BigQuery
+app.post('/api/products/clear', async (req, res) => {
+  try {
+    const bq = getBigQueryService();
+
+    if (!bq.isEnabled) {
+      return res.status(503).json({ error: 'BigQuery service is not configured' });
+    }
+
+    const { country, domain } = req.body;
+
+    const result = await bq.deleteProducts({ country, domain });
+    console.log(`[API] Cleared ${result.deleted} products from BigQuery`);
+    res.json({ success: true, deleted: result.deleted });
+  } catch (error) {
+    console.error('[API] POST /api/products/clear error:', error);
+    res.status(500).json({ error: 'Failed to clear products' });
   }
 });
 

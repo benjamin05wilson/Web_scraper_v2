@@ -9,6 +9,10 @@ dist/
 .env.local
 .env.*.local
 
+# Google Cloud credentials
+ai-commerce-lab-27bbf11522d0.json
+*.json.key
+
 # IDE
 .vscode/
 .idea/
