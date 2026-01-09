@@ -2791,7 +2791,7 @@ async function handleMessage(
         console.log(`[Server] batch:browserScrape completed for ${url}: ${result.items?.length || 0} items, success=${result.success}`);
 
         // Check if scrape was blocked by bot protection (captcha, cloudflare, etc.)
-        if (!result.success && result.errors?.some(e =>
+        if (!result.success && result.errors?.some((e: string) =>
           e.includes('Cloudflare') || e.includes('CAPTCHA') || e.includes('access denied') || e.includes('blocked')
         )) {
           console.log(`[Server] Bot protection detected in batch scrape at ${url}`);
@@ -3117,8 +3117,8 @@ async function startBatchScreencast(
 
   console.log(`[Server] Starting batch screencast for browser ${browserId.substring(0, 8)}`);
 
-  // Set up frame handler
-  const frameHandler = (params: { data: string; metadata: { timestamp: number }; sessionId: number }) => {
+  // Set up frame handler - use any for CDP event payload to avoid strict type mismatch
+  const frameHandler = (params: { data: string; metadata: { timestamp?: number }; sessionId: number }) => {
     if (ws.readyState !== WebSocket.OPEN) return;
 
     // CRITICAL: Acknowledge the frame so CDP continues sending frames
@@ -3134,7 +3134,8 @@ async function startBatchScreencast(
     ws.send(combined);
   };
 
-  cdp.on('Page.screencastFrame', frameHandler);
+  // Cast to any to avoid CDP type strictness issues
+  cdp.on('Page.screencastFrame', frameHandler as Parameters<typeof cdp.on>[1]);
 
   // Start screencast
   await cdp.send('Page.startScreencast', {
@@ -3147,7 +3148,7 @@ async function startBatchScreencast(
 
   // Store cleanup function
   batchScreencasts.set(browserId, () => {
-    cdp.off('Page.screencastFrame', frameHandler);
+    cdp.off('Page.screencastFrame', frameHandler as Parameters<typeof cdp.off>[1]);
     cdp.send('Page.stopScreencast').catch(() => {});
   });
 }

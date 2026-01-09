@@ -102,6 +102,7 @@ export type WSMessageType =
   | 'batch:captchaDetected'
   | 'batch:captchaSolved'
   | 'batch:captchaTimeout'
+  | 'batch:slotInput'
   // Cloudflare bypass messages
   | 'cloudflare:exportCookies'
   | 'cloudflare:cookiesExported'
