@@ -117,7 +117,10 @@ export type WSMessageType =
   | 'builder:fieldScreenshot'
   | 'builder:generateWizardSteps'
   | 'builder:wizardSteps'
-  | 'builder:nonSaleWizardSteps';
+  | 'builder:nonSaleWizardSteps'
+  // Builder validation messages
+  | 'builder:validateSelectors'
+  | 'builder:validationResult';
 
 export interface WSMessage<T = unknown> {
   type: WSMessageType;

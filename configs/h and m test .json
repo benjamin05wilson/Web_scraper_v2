@@ -1,0 +1,23 @@
+{
+  "competitor_type": "global",
+  "country": "United Kingdom",
+  "url": "https://www2.hm.com/en_gb/men/shoes/sneakers.html",
+  "selectors": {
+    "saleProduct": {},
+    "nonSaleProduct": {
+      "Title": [
+        "h2.ec794b.b01e0a"
+      ],
+      "Price": [
+        "span.c52734.fea13a"
+      ],
+      "URL": [
+        "a:nth-of-type(1)"
+      ],
+      "Image": [
+        "img"
+      ]
+    }
+  },
+  "itemContainer": "ul.da0d52 > li"
+}

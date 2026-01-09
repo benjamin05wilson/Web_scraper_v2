@@ -1,0 +1,37 @@
+{
+  "competitor_type": "local",
+  "country": "",
+  "url": "https://www.otto.de/heimtextilien/bettwaesche/",
+  "selectors": {
+    "saleProduct": {
+      "Title": [
+        "p.find_tile__name"
+      ],
+      "Price": [
+        "span.find_tile__retailPrice"
+      ],
+      "URL": [
+        "a.find_tile__productLink"
+      ],
+      "Image": [
+        "img.find_tile__productImage"
+      ]
+    },
+    "nonSaleProduct": {}
+  },
+  "itemContainer": "li.find_tile.js_reptile_crocotile_colors.js_find_compare.find_tile--visible",
+  "dismiss_actions": [
+    {
+      "selector": "[role=\"dialog\"] text=\"OK\"",
+      "text": "OK"
+    }
+  ],
+  "pagination": {
+    "type": "infinite_scroll",
+    "scrollPositions": [
+      1522.2223297558771
+    ],
+    "productsPerPage": 10,
+    "max_pages": 10
+  }
+}

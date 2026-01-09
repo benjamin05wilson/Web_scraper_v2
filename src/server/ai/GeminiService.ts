@@ -21,6 +21,8 @@ import type {
   // Pagination verification types
   PaginationVerificationResult,
   PaginationCandidateResult,
+  // HTML-based field selector detection
+  GeminiFieldSelectorsResult,
 } from './types.js';
 
 // Rate limiter - simple token bucket
@@ -163,21 +165,27 @@ export class GeminiService {
       try {
         await this.rateLimiter.acquire();
 
+        // Request options with extended timeout (120 seconds for large HTML payloads)
+        const requestOptions = { timeout: 120000 };
+
         let result;
         if (imageBase64) {
           // Vision request with image
-          result = await this.model.generateContent([
-            prompt,
-            {
-              inlineData: {
-                mimeType: 'image/png',
-                data: imageBase64,
+          result = await this.model.generateContent(
+            [
+              prompt,
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: imageBase64,
+                },
               },
-            },
-          ]);
+            ],
+            requestOptions
+          );
         } else {
           // Text-only request
-          result = await this.model.generateContent(prompt);
+          result = await this.model.generateContent(prompt, requestOptions);
         }
 
         const responseText = result.response.text();
@@ -810,7 +818,9 @@ If problems found:
           });
         }
 
-        const result = await this.model.generateContent(content);
+        // Request options with extended timeout (120 seconds for large payloads)
+        const requestOptions = { timeout: 120000 };
+        const result = await this.model.generateContent(content, requestOptions);
         const responseText = result.response.text();
         const parsed = this.parseJsonResponse<T>(responseText);
 
@@ -1019,6 +1029,136 @@ If no pagination found:
 }`;
 
     return this.callWithRetry<PaginationCandidateResult>(prompt, screenshot);
+  }
+
+  // ===========================================================================
+  // HTML-BASED FIELD SELECTOR DETECTION
+  // ===========================================================================
+
+  /**
+   * Detect CSS selectors for product fields by analyzing page HTML.
+   * This replaces the local heuristic approach with AI-powered detection.
+   *
+   * @param pageHTML - Full page HTML (cleaned, truncated to ~30KB)
+   * @param containerSelector - Known product container CSS selector
+   * @param sampleContainerHTMLs - 2-3 sample product container HTML snippets
+   */
+  async detectProductFieldSelectors(
+    pageHTML: string,
+    containerSelector: string,
+    sampleContainerHTMLs: string[]
+  ): Promise<AIDetectionResult<GeminiFieldSelectorsResult>> {
+    const prompt = `You are analyzing e-commerce product page HTML to find CSS selectors for product fields.
+
+PRODUCT CONTAINER SELECTOR: ${containerSelector}
+
+SAMPLE PRODUCT CONTAINERS (${sampleContainerHTMLs.length} examples):
+${sampleContainerHTMLs.map((html, i) => `--- Sample ${i + 1} ---\n${html}\n`).join('\n')}
+
+FULL PAGE HTML (for context, may be truncated):
+${pageHTML.substring(0, 25000)}${pageHTML.length > 25000 ? '\n... [truncated]' : ''}
+
+YOUR TASK: Find CSS selectors for these fields RELATIVE TO THE PRODUCT CONTAINER.
+The selectors must work with: container.querySelector(selector)
+
+═══════════════════════════════════════════════════════════════════════════════
+FIELD DEFINITIONS:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. TITLE - The product name/description
+   ✓ Look for: h1, h2, h3, h4, h5, h6, [class*="title"], [class*="name"], [class*="product-name"]
+   ✓ Should be descriptive text (typically 5-200 characters)
+   ✗ NOT: brand names alone, category names, ratings
+
+2. RRP (Regular Retail Price) - The original/full price
+   ✓ Look for elements with currency symbols: £, $, €, ¥, ₹
+   ✓ Look for: [class*="price"], [class*="was"], [class*="original"], [class*="rrp"], [class*="regular"]
+   ✓ If TWO prices exist: RRP is the HIGHER/crossed-out/was price
+   ✓ If ONE price exists: That single price is the RRP
+
+3. SALE PRICE - The discounted/current price (ONLY if products are on sale)
+   ✓ Only exists when there are TWO different prices shown
+   ✓ The LOWER price / "now" price / current selling price
+   ✓ Look for: [class*="sale"], [class*="now"], [class*="current"], [class*="offer"], [class*="special"]
+   ✓ Return null if products are NOT on sale (only one price shown)
+
+4. URL - Link to product detail page
+   ✓ The main product link (usually wraps the product card or title)
+   ✓ Look for: a[href] containing "/product/", "/p/", "/item/", "/dp/", "/pdp/"
+   ✓ May be the container itself if the container is an <a> tag - use ":self" in that case
+   ✗ NOT: color variant links, "quick view" links, add to cart links
+
+5. IMAGE - Main product image
+   ✓ The primary/largest product photo
+   ✓ Look for: img with [class*="product"], [class*="image"], or the first significant img
+   ✓ Consider data-src, data-lazy-src for lazy-loaded images
+   ✗ NOT: color swatches (tiny images), brand logos, icons, thumbnails
+
+═══════════════════════════════════════════════════════════════════════════════
+IMPORTANT RULES:
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Selectors must be RELATIVE to the container (work with container.querySelector)
+2. Use simple, reliable selectors - prefer classes over complex nth-child paths
+3. For the URL field: if the container itself is an <a> tag, use ":self" as the selector
+4. Analyze ALL sample containers to find patterns that work across products
+5. Set hasSalePrice: true ONLY if you see TWO distinct price elements (was/now pattern)
+
+═══════════════════════════════════════════════════════════════════════════════
+RESPONSE FORMAT:
+═══════════════════════════════════════════════════════════════════════════════
+
+Return ONLY valid JSON in this exact format:
+
+For products WITH sale pricing (two prices visible):
+{
+  "success": true,
+  "containerSelector": "${containerSelector}",
+  "fields": {
+    "title": { "selector": "h3.product-title", "confidence": 0.95, "sampleValue": "Nike Air Max 90" },
+    "rrp": { "selector": "span.was-price", "confidence": 0.9, "sampleValue": "£120.00" },
+    "salePrice": { "selector": "span.now-price", "confidence": 0.9, "sampleValue": "£89.99" },
+    "url": { "selector": "a.product-link", "confidence": 0.95, "sampleValue": "/product/12345" },
+    "image": { "selector": "img.product-image", "confidence": 0.9, "sampleValue": "https://example.com/img.jpg" }
+  },
+  "hasSalePrice": true,
+  "confidence": 0.92,
+  "reasoning": "Found standard product card with was/now pricing pattern. Title in h3, prices in spans with clear class names."
+}
+
+For products WITHOUT sale pricing (single price only):
+{
+  "success": true,
+  "containerSelector": "${containerSelector}",
+  "fields": {
+    "title": { "selector": "h3.product-title", "confidence": 0.95, "sampleValue": "Nike Air Max 90" },
+    "rrp": { "selector": "span.price", "confidence": 0.95, "sampleValue": "£99.00" },
+    "salePrice": null,
+    "url": { "selector": ":self", "confidence": 0.95, "sampleValue": "/product/12345" },
+    "image": { "selector": "img", "confidence": 0.85, "sampleValue": "https://example.com/img.jpg" }
+  },
+  "hasSalePrice": false,
+  "confidence": 0.90,
+  "reasoning": "Container is an anchor tag, single price element found, no sale pricing detected."
+}
+
+If unable to detect fields:
+{
+  "success": false,
+  "containerSelector": "${containerSelector}",
+  "fields": {
+    "title": null,
+    "rrp": null,
+    "salePrice": null,
+    "url": null,
+    "image": null
+  },
+  "hasSalePrice": false,
+  "confidence": 0.2,
+  "reasoning": "Could not identify product field patterns in the provided HTML."
+}`;
+
+    return this.callWithRetry<GeminiFieldSelectorsResult>(prompt);
   }
 }
 

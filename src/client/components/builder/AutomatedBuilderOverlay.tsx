@@ -64,6 +64,9 @@ export function AutomatedBuilderOverlay({
       // During demo mode, only allow skip - user interaction happens in browser view
       if (type === 'pagination_demo') return;
 
+      // During popup_closing, no keyboard shortcuts - just wait
+      if (type === 'popup_closing' || type === 'captcha') return;
+
       // Demo success mode keyboard shortcuts
       if (type === 'pagination_demo_success') {
         if (e.key === 'Enter' || e.key === 'y' || e.key === 'Y') {
@@ -123,6 +126,22 @@ export function AutomatedBuilderOverlay({
             <p className="overlay-hint">
               The flow will automatically continue once the CAPTCHA is solved.
               (Timeout: 2 minutes)
+            </p>
+          </>
+        );
+
+      case 'popup_closing':
+        return (
+          <>
+            <div className="overlay-icon" style={{ color: 'var(--accent-primary)' }}>
+              <div className="spinner" style={{ width: '48px', height: '48px', borderWidth: '3px' }}></div>
+            </div>
+            <h2 className="overlay-title">Preparing Page</h2>
+            <p className="overlay-description">
+              Closing popups and cookie banners automatically...
+            </p>
+            <p className="overlay-hint" style={{ marginTop: '10px', opacity: 0.7 }}>
+              Please wait while the page is being prepared for scraping.
             </p>
           </>
         );
@@ -323,8 +342,8 @@ export function AutomatedBuilderOverlay({
     }
   };
 
-  // Demo mode and captcha mode have no actions - captcha only needs user to solve in browser
-  const showActions = type !== 'pagination_demo' && type !== 'captcha';
+  // Demo mode, captcha mode, and popup_closing have no actions - user can't interact during these
+  const showActions = type !== 'pagination_demo' && type !== 'captcha' && type !== 'popup_closing';
 
   // Render action buttons based on overlay type
   const renderActions = () => {

@@ -293,13 +293,8 @@ export function BuilderPage() {
       viewport: { width: viewportWidth, height: viewportHeight },
       useRealChrome: true, // Always use Real Chrome
     });
-
-    setTimeout(() => {
-      if (sessionId) {
-        send('webrtc:offer', {}, sessionId);
-      }
-    }, 1000);
-  }, [url, connected, session, send, addLog, flow, sessionId]);
+    // Note: webrtc:offer is sent automatically by useEffect when session becomes ready
+  }, [url, connected, session, addLog, flow]);
 
   // Close browser
   const handleCloseBrowser = useCallback(() => {
@@ -981,6 +976,145 @@ export function BuilderPage() {
                   }
                 }}
               />
+            )}
+
+            {/* Selector Validation - shows validation results */}
+            {flow.state === 'VALIDATING_SELECTORS' && (
+              <div className="step-card">
+                <h2 className="step-title">Validating Selectors</h2>
+                {flow.isValidating ? (
+                  <div style={{
+                    textAlign: 'center',
+                    padding: '40px 20px',
+                    background: 'var(--bg-secondary)',
+                    borderRadius: '12px',
+                    margin: '10px 0',
+                  }}>
+                    <div className="spinner" style={{
+                      width: '40px',
+                      height: '40px',
+                      margin: '0 auto 15px',
+                      borderWidth: '3px',
+                    }}></div>
+                    <div style={{
+                      fontSize: '1.1em',
+                      fontWeight: '500',
+                      marginBottom: '8px',
+                    }}>
+                      Validating Selectors
+                    </div>
+                    <div style={{
+                      color: 'var(--text-secondary)',
+                      fontSize: '0.9em'
+                    }}>
+                      Testing selectors against page to verify extraction...
+                    </div>
+                  </div>
+                ) : flow.validationResult ? (
+                  <div>
+                    {/* Product Count */}
+                    <div style={{
+                      background: flow.validationResult.productCount > 0 ? 'var(--success-bg)' : 'var(--error-bg)',
+                      padding: '15px',
+                      borderRadius: '8px',
+                      marginBottom: '15px',
+                      textAlign: 'center',
+                    }}>
+                      <div style={{ fontSize: '2em', fontWeight: 'bold' }}>
+                        {flow.validationResult.productCount}
+                      </div>
+                      <div>Products Found</div>
+                    </div>
+
+                    {/* Field Completeness */}
+                    <div style={{ marginBottom: '15px' }}>
+                      <h3 style={{ fontSize: '0.9em', marginBottom: '10px' }}>Field Extraction Rates</h3>
+                      {Object.entries(flow.validationResult.fieldCompleteness)
+                        .filter(([field, stats]) => {
+                          // Skip salePrice if no sale products exist
+                          if (field === 'salePrice') {
+                            // If there are no sale products, don't show sale price field
+                            if (flow.productTypeCounts.withSale === 0) return false;
+                            // Also skip if no sale price was expected (0 found out of total)
+                            if (stats.found === 0 && stats.total > 0) {
+                              const hasSalePriceSelector = flow.confirmedFields.some(f => f.field === 'Sale Price');
+                              if (!hasSalePriceSelector) return false;
+                            }
+                          }
+                          return true;
+                        })
+                        .map(([field, stats]) => (
+                        <div key={field} style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '8px 0',
+                          borderBottom: '1px solid var(--border-color)',
+                        }}>
+                          <span style={{ textTransform: 'capitalize' }}>{field === 'salePrice' ? 'Sale Price' : field === 'rrp' ? 'RRP' : field}</span>
+                          <span style={{
+                            color: stats.percentage >= 80 ? 'var(--success-color)' : stats.percentage >= 50 ? 'var(--warning-color)' : 'var(--error-color)',
+                            fontWeight: 'bold',
+                          }}>
+                            {stats.found}/{stats.total} ({stats.percentage}%)
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Issues */}
+                    {flow.validationResult.issues.length > 0 && (
+                      <div style={{
+                        background: 'var(--warning-bg)',
+                        padding: '10px',
+                        borderRadius: '8px',
+                        marginBottom: '15px',
+                      }}>
+                        <h3 style={{ fontSize: '0.9em', marginBottom: '5px' }}>Warnings</h3>
+                        <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                          {flow.validationResult.issues.map((issue, idx) => (
+                            <li key={idx} style={{ fontSize: '0.85em' }}>{issue}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Sample Products */}
+                    {flow.validationResult.sampleProducts.length > 0 && (
+                      <div style={{ marginBottom: '15px' }}>
+                        <h3 style={{ fontSize: '0.9em', marginBottom: '10px' }}>Sample Products</h3>
+                        <div style={{ maxHeight: '200px', overflow: 'auto' }}>
+                          {flow.validationResult.sampleProducts.slice(0, 3).map((product, idx) => (
+                            <div key={idx} style={{
+                              background: 'var(--bg-secondary)',
+                              padding: '10px',
+                              borderRadius: '4px',
+                              marginBottom: '8px',
+                              fontSize: '0.85em',
+                            }}>
+                              <div><strong>Title:</strong> {product.title || '(not found)'}</div>
+                              <div><strong>Price:</strong> {product.rrp || '(not found)'} {product.salePrice && `→ ${product.salePrice}`}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Actions */}
+                    <div style={{ display: 'flex', gap: '10px' }}>
+                      <button
+                        className="btn-large"
+                        onClick={() => flow.transition('VALIDATION_COMPLETE')}
+                        style={{ flex: 1 }}
+                      >
+                        Continue to Final Config
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ color: 'var(--text-muted)' }}>Waiting for validation...</div>
+                )}
+              </div>
             )}
 
             {/* Country Selection - shows in final config */}

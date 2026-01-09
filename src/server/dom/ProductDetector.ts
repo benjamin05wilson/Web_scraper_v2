@@ -2530,4 +2530,593 @@ export class ProductDetector {
       return null;
     }
   }
+
+  // ===========================================================================
+  // HTML EXTRACTION FOR AI-BASED FIELD DETECTION
+  // ===========================================================================
+
+  /**
+   * Extract full page HTML with cleanup for AI analysis.
+   * Removes scripts, styles, and non-essential elements to reduce size.
+   */
+  async extractPageHTML(options?: {
+    maxLength?: number;
+    removeScripts?: boolean;
+    removeStyles?: boolean;
+    removeComments?: boolean;
+  }): Promise<string> {
+    const opts = {
+      maxLength: options?.maxLength ?? 50000,
+      removeScripts: options?.removeScripts ?? true,
+      removeStyles: options?.removeStyles ?? true,
+      removeComments: options?.removeComments ?? true,
+    };
+
+    console.log(`[ProductDetector] Extracting page HTML with options:`, opts);
+
+    try {
+      const evalOpts = { removeScripts: opts.removeScripts, removeStyles: opts.removeStyles };
+      const html = await this.page.evaluate((args: { removeScripts: boolean; removeStyles: boolean }) => {
+        // Clone the document to avoid modifying the live DOM
+        const clone = document.documentElement.cloneNode(true) as HTMLElement;
+
+        if (args.removeScripts) {
+          // Remove script tags
+          const scripts = clone.querySelectorAll('script, noscript');
+          scripts.forEach(el => el.remove());
+        }
+
+        if (args.removeStyles) {
+          // Remove style tags and inline styles
+          const styles = clone.querySelectorAll('style');
+          styles.forEach(el => el.remove());
+
+          // Remove style attributes to reduce noise (optional - might remove useful class hints)
+          // const elementsWithStyle = clone.querySelectorAll('[style]');
+          // elementsWithStyle.forEach(el => el.removeAttribute('style'));
+        }
+
+        // Remove hidden elements that clutter the HTML
+        const hidden = clone.querySelectorAll('[hidden], [aria-hidden="true"]');
+        hidden.forEach(el => el.remove());
+
+        // Remove SVG content (often huge and not useful for selector detection)
+        const svgs = clone.querySelectorAll('svg');
+        svgs.forEach(svg => {
+          const placeholder = document.createElement('svg');
+          placeholder.setAttribute('class', svg.getAttribute('class') || '');
+          svg.parentNode?.replaceChild(placeholder, svg);
+        });
+
+        return clone.outerHTML;
+      }, evalOpts);
+
+      // Remove HTML comments if requested
+      let cleanedHtml = html;
+      if (opts.removeComments) {
+        cleanedHtml = cleanedHtml.replace(/<!--[\s\S]*?-->/g, '');
+      }
+
+      // Collapse whitespace to reduce size
+      cleanedHtml = cleanedHtml.replace(/\s+/g, ' ');
+
+      // Truncate if too long
+      if (cleanedHtml.length > opts.maxLength) {
+        console.log(`[ProductDetector] HTML truncated from ${cleanedHtml.length} to ${opts.maxLength} chars`);
+        cleanedHtml = cleanedHtml.substring(0, opts.maxLength);
+      }
+
+      console.log(`[ProductDetector] Extracted page HTML: ${cleanedHtml.length} chars`);
+      return cleanedHtml;
+    } catch (error) {
+      console.error('[ProductDetector] extractPageHTML error:', error);
+      return '';
+    }
+  }
+
+  /**
+   * Extract HTML of sample product containers for AI analysis.
+   */
+  async extractContainerSamples(
+    containerSelector: string,
+    maxSamples: number = 3
+  ): Promise<string[]> {
+    console.log(`[ProductDetector] Extracting ${maxSamples} container samples for: ${containerSelector}`);
+
+    try {
+      const evalArgs = { selector: containerSelector, max: maxSamples };
+      const samples = await this.page.evaluate((args: { selector: string; max: number }) => {
+        const containers = document.querySelectorAll(args.selector);
+        const results: string[] = [];
+
+        for (let i = 0; i < Math.min(containers.length, args.max); i++) {
+          const container = containers[i];
+          let html = container.outerHTML;
+
+          // Limit each sample to 5KB
+          if (html.length > 5000) {
+            html = html.substring(0, 5000) + '... [truncated]';
+          }
+
+          results.push(html);
+        }
+
+        return results;
+      }, evalArgs);
+
+      console.log(`[ProductDetector] Extracted ${samples.length} container samples`);
+      return samples;
+    } catch (error) {
+      console.error('[ProductDetector] extractContainerSamples error:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Find diverse product examples using Gemini AI for field detection.
+   * This is the AI-powered replacement for findDiverseExamples().
+   */
+  async findDiverseExamplesWithAI(
+    containerSelector: string,
+    maxPerType: number = 2
+  ): Promise<{
+    withSale: Array<{
+      selector: string;
+      fields: Array<{
+        field: 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'Image';
+        selector: string;
+        value: string;
+        bounds: { x: number; y: number; width: number; height: number };
+      }>;
+    }>;
+    withoutSale: Array<{
+      selector: string;
+      fields: Array<{
+        field: 'Title' | 'RRP' | 'URL' | 'Image';
+        selector: string;
+        value: string;
+        bounds: { x: number; y: number; width: number; height: number };
+      }>;
+    }>;
+  }> {
+    console.log(`[ProductDetector] findDiverseExamplesWithAI for: ${containerSelector}`);
+
+    const gemini = getGeminiService();
+    if (!gemini.isEnabled) {
+      console.log('[ProductDetector] Gemini not enabled, returning empty result');
+      return { withSale: [], withoutSale: [] };
+    }
+
+    try {
+      // Step 1: Extract page HTML and container samples
+      const pageHTML = await this.extractPageHTML({ maxLength: 30000 });
+      const containerSamples = await this.extractContainerSamples(containerSelector, 3);
+
+      if (containerSamples.length === 0) {
+        console.log('[ProductDetector] No container samples found');
+        return { withSale: [], withoutSale: [] };
+      }
+
+      // Step 2: Call Gemini to detect field selectors
+      const aiResult = await gemini.detectProductFieldSelectors(
+        pageHTML,
+        containerSelector,
+        containerSamples
+      );
+
+      if (!aiResult.success || !aiResult.data) {
+        console.log('[ProductDetector] AI detection failed:', aiResult.error);
+        return { withSale: [], withoutSale: [] };
+      }
+
+      const fieldSelectors = aiResult.data;
+      console.log(`[ProductDetector] AI detected selectors:`, JSON.stringify(fieldSelectors.fields, null, 2));
+
+      // Step 3: Validate selectors and extract values from DOM
+      const examples = await this.validateAndExtractFields(
+        containerSelector,
+        fieldSelectors,
+        maxPerType
+      );
+
+      console.log(`[ProductDetector] AI examples: ${examples.withSale.length} with sale, ${examples.withoutSale.length} without sale`);
+      return examples;
+
+    } catch (error) {
+      console.error('[ProductDetector] findDiverseExamplesWithAI error:', error);
+      return { withSale: [], withoutSale: [] };
+    }
+  }
+
+  /**
+   * Validate AI-detected selectors against the DOM and extract actual values.
+   */
+  private async validateAndExtractFields(
+    containerSelector: string,
+    fieldSelectors: import('../ai/types.js').GeminiFieldSelectorsResult,
+    maxPerType: number
+  ): Promise<{
+    withSale: Array<{
+      selector: string;
+      fields: Array<{
+        field: 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'Image';
+        selector: string;
+        value: string;
+        bounds: { x: number; y: number; width: number; height: number };
+      }>;
+    }>;
+    withoutSale: Array<{
+      selector: string;
+      fields: Array<{
+        field: 'Title' | 'RRP' | 'URL' | 'Image';
+        selector: string;
+        value: string;
+        bounds: { x: number; y: number; width: number; height: number };
+      }>;
+    }>;
+  }> {
+    const selectors = fieldSelectors.fields;
+
+    const script = `
+      (function() {
+        const containerSelector = ${JSON.stringify(containerSelector)};
+        const titleSelector = ${JSON.stringify(selectors.title?.selector || null)};
+        const rrpSelector = ${JSON.stringify(selectors.rrp?.selector || null)};
+        const salePriceSelector = ${JSON.stringify(selectors.salePrice?.selector || null)};
+        const urlSelector = ${JSON.stringify(selectors.url?.selector || null)};
+        const imageSelector = ${JSON.stringify(selectors.image?.selector || null)};
+        const hasSalePrice = ${JSON.stringify(fieldSelectors.hasSalePrice)};
+        const maxPerType = ${maxPerType};
+
+        const containers = document.querySelectorAll(containerSelector);
+        const withSale = [];
+        const withoutSale = [];
+
+        // Helper to get nth-child selector for container
+        function getNthSelector(container, index) {
+          const tag = container.tagName.toLowerCase();
+          const classes = Array.from(container.classList)
+            .filter(c => !c.match(/^[0-9]|hover|active|focus|selected/i))
+            .slice(0, 2);
+
+          if (classes.length > 0) {
+            return tag + '.' + classes.map(c => CSS.escape(c)).join('.') + ':nth-of-type(' + (index + 1) + ')';
+          }
+          return containerSelector + ':nth-of-type(' + (index + 1) + ')';
+        }
+
+        // Helper to extract field value and bounds
+        function extractField(container, selector, fieldName) {
+          if (!selector) return null;
+
+          let el = null;
+          if (selector === ':self') {
+            el = container;
+          } else {
+            el = container.querySelector(selector);
+          }
+
+          if (!el) return null;
+
+          const rect = el.getBoundingClientRect();
+          let value = '';
+
+          if (fieldName === 'Image') {
+            value = el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || '';
+          } else if (fieldName === 'URL') {
+            value = el.href || el.getAttribute('href') || '';
+          } else {
+            value = (el.textContent || '').trim();
+          }
+
+          return {
+            field: fieldName,
+            selector: selector,
+            value: value.substring(0, 200),
+            bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+          };
+        }
+
+        for (let i = 0; i < containers.length; i++) {
+          const container = containers[i];
+          const fields = [];
+
+          // Extract each field
+          const titleField = extractField(container, titleSelector, 'Title');
+          if (titleField) fields.push(titleField);
+
+          const rrpField = extractField(container, rrpSelector, 'RRP');
+          if (rrpField) fields.push(rrpField);
+
+          if (hasSalePrice && salePriceSelector) {
+            const salePriceField = extractField(container, salePriceSelector, 'Sale Price');
+            if (salePriceField) fields.push(salePriceField);
+          }
+
+          const urlField = extractField(container, urlSelector, 'URL');
+          if (urlField) fields.push(urlField);
+
+          const imageField = extractField(container, imageSelector, 'Image');
+          if (imageField) fields.push(imageField);
+
+          // Skip containers with no fields found
+          if (fields.length === 0) continue;
+
+          const example = {
+            selector: getNthSelector(container, i),
+            fields: fields
+          };
+
+          // Categorize based on whether we have sale pricing
+          if (hasSalePrice && fields.some(f => f.field === 'Sale Price')) {
+            if (withSale.length < maxPerType) {
+              withSale.push(example);
+            }
+          } else {
+            if (withoutSale.length < maxPerType) {
+              withoutSale.push(example);
+            }
+          }
+
+          // Stop if we have enough
+          if (withSale.length >= maxPerType && withoutSale.length >= maxPerType) {
+            break;
+          }
+        }
+
+        return { withSale, withoutSale };
+      })()
+    `;
+
+    try {
+      const result = await this.page.evaluate(script) as {
+        withSale: Array<{
+          selector: string;
+          fields: Array<{
+            field: 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'Image';
+            selector: string;
+            value: string;
+            bounds: { x: number; y: number; width: number; height: number };
+          }>;
+        }>;
+        withoutSale: Array<{
+          selector: string;
+          fields: Array<{
+            field: 'Title' | 'RRP' | 'URL' | 'Image';
+            selector: string;
+            value: string;
+            bounds: { x: number; y: number; width: number; height: number };
+          }>;
+        }>;
+      };
+
+      return result;
+    } catch (error) {
+      console.error('[ProductDetector] validateAndExtractFields error:', error);
+      return { withSale: [], withoutSale: [] };
+    }
+  }
+
+  // ===========================================================================
+  // SELECTOR VALIDATION - Test selectors and count extracted products
+  // ===========================================================================
+
+  /**
+   * Validate selectors by running them against the current page.
+   * Returns the number of products extracted and sample data.
+   */
+  async validateSelectors(
+    containerSelector: string,
+    fieldSelectors: {
+      title?: string;
+      rrp?: string;
+      salePrice?: string;
+      url?: string;
+      image?: string;
+    }
+  ): Promise<{
+    success: boolean;
+    productCount: number;
+    fieldCompleteness: {
+      title: { found: number; total: number; percentage: number };
+      rrp: { found: number; total: number; percentage: number };
+      salePrice: { found: number; total: number; percentage: number };
+      url: { found: number; total: number; percentage: number };
+      image: { found: number; total: number; percentage: number };
+    };
+    sampleProducts: Array<{
+      title?: string;
+      rrp?: string;
+      salePrice?: string;
+      url?: string;
+      image?: string;
+    }>;
+    issues: string[];
+  }> {
+    console.log(`[ProductDetector] Validating selectors for: ${containerSelector}`);
+
+    const script = `
+      (function() {
+        const containerSelector = ${JSON.stringify(containerSelector)};
+        const titleSelector = ${JSON.stringify(fieldSelectors.title || null)};
+        const rrpSelector = ${JSON.stringify(fieldSelectors.rrp || null)};
+        const salePriceSelector = ${JSON.stringify(fieldSelectors.salePrice || null)};
+        const urlSelector = ${JSON.stringify(fieldSelectors.url || null)};
+        const imageSelector = ${JSON.stringify(fieldSelectors.image || null)};
+
+        const containers = document.querySelectorAll(containerSelector);
+        const productCount = containers.length;
+        const issues = [];
+
+        if (productCount === 0) {
+          return {
+            success: false,
+            productCount: 0,
+            fieldCompleteness: {
+              title: { found: 0, total: 0, percentage: 0 },
+              rrp: { found: 0, total: 0, percentage: 0 },
+              salePrice: { found: 0, total: 0, percentage: 0 },
+              url: { found: 0, total: 0, percentage: 0 },
+              image: { found: 0, total: 0, percentage: 0 }
+            },
+            sampleProducts: [],
+            issues: ['No product containers found with selector: ' + containerSelector]
+          };
+        }
+
+        // Track field completeness
+        const fieldCounts = {
+          title: 0,
+          rrp: 0,
+          salePrice: 0,
+          url: 0,
+          image: 0
+        };
+
+        const sampleProducts = [];
+
+        // Helper to extract field value
+        function extractField(container, selector, fieldType) {
+          if (!selector) return null;
+
+          let el = null;
+          if (selector === ':self') {
+            el = container;
+          } else {
+            el = container.querySelector(selector);
+          }
+
+          if (!el) return null;
+
+          if (fieldType === 'image') {
+            return el.src || el.getAttribute('data-src') || el.getAttribute('data-lazy-src') || '';
+          } else if (fieldType === 'url') {
+            return el.href || el.getAttribute('href') || '';
+          } else {
+            return (el.textContent || '').trim();
+          }
+        }
+
+        // Process each container
+        for (let i = 0; i < containers.length; i++) {
+          const container = containers[i];
+
+          const title = extractField(container, titleSelector, 'title');
+          const rrp = extractField(container, rrpSelector, 'rrp');
+          const salePrice = extractField(container, salePriceSelector, 'salePrice');
+          const url = extractField(container, urlSelector, 'url');
+          const image = extractField(container, imageSelector, 'image');
+
+          // Count non-empty fields
+          if (title && title.length > 0) fieldCounts.title++;
+          if (rrp && rrp.length > 0) fieldCounts.rrp++;
+          if (salePrice && salePrice.length > 0) fieldCounts.salePrice++;
+          if (url && url.length > 0) fieldCounts.url++;
+          if (image && image.length > 0) fieldCounts.image++;
+
+          // Collect sample products (first 5)
+          if (i < 5) {
+            sampleProducts.push({
+              title: title ? title.substring(0, 100) : null,
+              rrp: rrp || null,
+              salePrice: salePrice || null,
+              url: url ? url.substring(0, 200) : null,
+              image: image ? image.substring(0, 200) : null
+            });
+          }
+        }
+
+        // Calculate percentages
+        const fieldCompleteness = {
+          title: {
+            found: fieldCounts.title,
+            total: productCount,
+            percentage: Math.round((fieldCounts.title / productCount) * 100)
+          },
+          rrp: {
+            found: fieldCounts.rrp,
+            total: productCount,
+            percentage: Math.round((fieldCounts.rrp / productCount) * 100)
+          },
+          salePrice: {
+            found: fieldCounts.salePrice,
+            total: productCount,
+            percentage: Math.round((fieldCounts.salePrice / productCount) * 100)
+          },
+          url: {
+            found: fieldCounts.url,
+            total: productCount,
+            percentage: Math.round((fieldCounts.url / productCount) * 100)
+          },
+          image: {
+            found: fieldCounts.image,
+            total: productCount,
+            percentage: Math.round((fieldCounts.image / productCount) * 100)
+          }
+        };
+
+        // Generate issues based on completeness
+        if (titleSelector && fieldCompleteness.title.percentage < 50) {
+          issues.push('Title selector matches less than 50% of products');
+        }
+        if (rrpSelector && fieldCompleteness.rrp.percentage < 50) {
+          issues.push('Price selector matches less than 50% of products');
+        }
+        if (urlSelector && fieldCompleteness.url.percentage < 50) {
+          issues.push('URL selector matches less than 50% of products');
+        }
+        if (imageSelector && fieldCompleteness.image.percentage < 50) {
+          issues.push('Image selector matches less than 50% of products');
+        }
+
+        return {
+          success: true,
+          productCount,
+          fieldCompleteness,
+          sampleProducts,
+          issues
+        };
+      })()
+    `;
+
+    try {
+      const result = await this.page.evaluate(script) as {
+        success: boolean;
+        productCount: number;
+        fieldCompleteness: {
+          title: { found: number; total: number; percentage: number };
+          rrp: { found: number; total: number; percentage: number };
+          salePrice: { found: number; total: number; percentage: number };
+          url: { found: number; total: number; percentage: number };
+          image: { found: number; total: number; percentage: number };
+        };
+        sampleProducts: Array<{
+          title?: string;
+          rrp?: string;
+          salePrice?: string;
+          url?: string;
+          image?: string;
+        }>;
+        issues: string[];
+      };
+
+      console.log(`[ProductDetector] Validation result: ${result.productCount} products found`);
+      return result;
+    } catch (error) {
+      console.error('[ProductDetector] validateSelectors error:', error);
+      return {
+        success: false,
+        productCount: 0,
+        fieldCompleteness: {
+          title: { found: 0, total: 0, percentage: 0 },
+          rrp: { found: 0, total: 0, percentage: 0 },
+          salePrice: { found: 0, total: 0, percentage: 0 },
+          url: { found: 0, total: 0, percentage: 0 },
+          image: { found: 0, total: 0, percentage: 0 }
+        },
+        sampleProducts: [],
+        issues: [`Validation error: ${error}`]
+      };
+    }
+  }
 }

@@ -2023,10 +2023,45 @@ async function handleMessage(
 
       try {
         // Step 1: Find diverse examples (with sale and without)
-        const examples = await session.inspector.productDetector.findDiverseExamples(
+        // Try AI-based detection first, fall back to heuristic method
+        let examples: {
+          withSale: Array<{
+            selector: string;
+            fields: Array<{
+              field: 'Title' | 'RRP' | 'Sale Price' | 'URL' | 'Image';
+              selector: string;
+              value: string;
+              bounds: { x: number; y: number; width: number; height: number };
+            }>;
+          }>;
+          withoutSale: Array<{
+            selector: string;
+            fields: Array<{
+              field: 'Title' | 'RRP' | 'URL' | 'Image';
+              selector: string;
+              value: string;
+              bounds: { x: number; y: number; width: number; height: number };
+            }>;
+          }>;
+        };
+
+        // Try AI-based field detection first
+        console.log(`[Server] Attempting AI-based field detection...`);
+        examples = await session.inspector.productDetector.findDiverseExamplesWithAI(
           containerSelector,
           2
         );
+
+        // Fall back to heuristic method if AI returns empty or fails
+        if (examples.withSale.length === 0 && examples.withoutSale.length === 0) {
+          console.log(`[Server] AI detection returned no results, falling back to heuristic method...`);
+          examples = await session.inspector.productDetector.findDiverseExamples(
+            containerSelector,
+            2
+          );
+        } else {
+          console.log(`[Server] AI detection successful`);
+        }
 
         console.log(`[Server] Diverse examples found - withSale: ${examples.withSale.length}, withoutSale: ${examples.withoutSale.length}`);
         if (examples.withSale.length > 0) {
@@ -2236,6 +2271,62 @@ async function handleMessage(
           success: false,
           error: String(error),
           steps: [],
+        }, session.id);
+      }
+      break;
+    }
+
+    // =========================================================================
+    // SELECTOR VALIDATION
+    // =========================================================================
+
+    case 'builder:validateSelectors': {
+      const session = getSession(sessionId || getSessionId());
+      if (!session) return;
+
+      const { containerSelector, fieldSelectors } = payload as {
+        containerSelector: string;
+        fieldSelectors: {
+          title?: string;
+          rrp?: string;
+          salePrice?: string;
+          url?: string;
+          image?: string;
+        };
+      };
+
+      console.log(`[Server] Validating selectors for container: ${containerSelector}`);
+      console.log(`[Server] Field selectors:`, fieldSelectors);
+
+      try {
+        const result = await session.inspector.productDetector.validateSelectors(
+          containerSelector,
+          fieldSelectors
+        );
+
+        console.log(`[Server] Validation complete: ${result.productCount} products found`);
+
+        send(ws, 'builder:validationResult', {
+          success: result.success,
+          productCount: result.productCount,
+          fieldCompleteness: result.fieldCompleteness,
+          sampleProducts: result.sampleProducts,
+          issues: result.issues,
+        }, session.id);
+      } catch (error) {
+        console.error('[Server] validateSelectors failed:', error);
+        send(ws, 'builder:validationResult', {
+          success: false,
+          productCount: 0,
+          fieldCompleteness: {
+            title: { found: 0, total: 0, percentage: 0 },
+            rrp: { found: 0, total: 0, percentage: 0 },
+            salePrice: { found: 0, total: 0, percentage: 0 },
+            url: { found: 0, total: 0, percentage: 0 },
+            image: { found: 0, total: 0, percentage: 0 },
+          },
+          sampleProducts: [],
+          issues: [`Validation error: ${error}`],
         }, session.id);
       }
       break;

@@ -334,3 +334,35 @@ export interface PaginationDemoEvent {
   type: 'progress' | 'autoComplete' | 'wrongNavigation' | 'error';
   data: any;
 }
+
+// ============================================================================
+// HTML-BASED FIELD SELECTOR DETECTION TYPES
+// ============================================================================
+
+/**
+ * Individual field selector result from Gemini HTML analysis
+ */
+export interface FieldSelectorResult {
+  selector: string;       // CSS selector RELATIVE to product container
+  confidence: number;     // 0-1 confidence score
+  sampleValue?: string;   // Example value found (for verification)
+}
+
+/**
+ * Result from Gemini HTML-based field selector detection
+ * Used by the builder to get accurate selectors from page HTML
+ */
+export interface GeminiFieldSelectorsResult {
+  success: boolean;
+  containerSelector: string;  // The selector used for product containers
+  fields: {
+    title: FieldSelectorResult | null;
+    rrp: FieldSelectorResult | null;
+    salePrice: FieldSelectorResult | null;
+    url: FieldSelectorResult | null;
+    image: FieldSelectorResult | null;
+  };
+  hasSalePrice: boolean;      // True if products have sale pricing
+  confidence: number;         // Overall confidence
+  reasoning?: string;         // AI's explanation
+}

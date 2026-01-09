@@ -26,12 +26,13 @@ export type AutomatedBuilderState =
   | 'PAGINATION_MANUAL'       // Manual fallback
   | 'GENERATING_NON_SALE_WIZARD'  // Generating wizard steps for NON-SALE products (after pagination)
   | 'NON_SALE_FIELD_CONFIRMATION' // User confirming fields for non-sale products
+  | 'VALIDATING_SELECTORS'        // Validating selectors against page
   | 'FINAL_CONFIG'
   | 'SAVING'
   | 'COMPLETE';
 
 // Overlay types
-export type OverlayType = 'captcha' | 'popup' | 'product' | 'field_wizard' | 'pagination_demo' | 'pagination_demo_success' | null;
+export type OverlayType = 'captcha' | 'popup' | 'popup_closing' | 'product' | 'field_wizard' | 'pagination_demo' | 'pagination_demo_success' | null;
 
 // Wizard step type (matches FieldConfirmationWizard)
 export interface WizardStep {
@@ -157,6 +158,28 @@ export interface UseAutomatedBuilderFlowReturn {
   productTypeCounts: { withSale: number; withoutSale: number };
   nonSaleCompletedBefore: boolean;
 
+  // Validation data
+  validationResult: {
+    success: boolean;
+    productCount: number;
+    fieldCompleteness: {
+      title: { found: number; total: number; percentage: number };
+      rrp: { found: number; total: number; percentage: number };
+      salePrice: { found: number; total: number; percentage: number };
+      url: { found: number; total: number; percentage: number };
+      image: { found: number; total: number; percentage: number };
+    };
+    sampleProducts: Array<{
+      title?: string;
+      rrp?: string;
+      salePrice?: string;
+      url?: string;
+      image?: string;
+    }>;
+    issues: string[];
+  } | null;
+  isValidating: boolean;
+
   // State transitions
   transition: (event: BuilderEvent) => void;
 
@@ -227,6 +250,8 @@ type BuilderEvent =
   | 'NON_SALE_WIZARD_FAILED' // Failed to generate non-sale wizard steps
   | 'NON_SALE_WIZARD_COMPLETED' // User completed non-sale wizard
   | 'NON_SALE_WIZARD_SKIPPED'   // User skipped non-sale wizard
+  | 'VALIDATION_COMPLETE'       // Selector validation complete
+  | 'VALIDATION_SKIPPED'        // User skipped validation
   | 'SAVE_CLICKED'
   | 'SAVE_SUCCESS'
   | 'RESET';
@@ -252,6 +277,7 @@ const STEP_TITLES: Record<AutomatedBuilderState, string> = {
   PAGINATION_MANUAL: 'Configure Pagination',
   GENERATING_NON_SALE_WIZARD: 'Preparing Non-Sale Wizard',
   NON_SALE_FIELD_CONFIRMATION: 'Confirm Non-Sale Product Fields',
+  VALIDATING_SELECTORS: 'Validating Selectors',
   FINAL_CONFIG: 'Final Configuration',
   SAVING: 'Saving Config',
   COMPLETE: 'Complete',
@@ -278,9 +304,10 @@ const STEP_NUMBERS: Record<AutomatedBuilderState, number> = {
   PAGINATION_MANUAL: 7,
   GENERATING_NON_SALE_WIZARD: 8,
   NON_SALE_FIELD_CONFIRMATION: 8,
-  FINAL_CONFIG: 9,
-  SAVING: 9,
-  COMPLETE: 9,
+  VALIDATING_SELECTORS: 9,
+  FINAL_CONFIG: 10,
+  SAVING: 10,
+  COMPLETE: 10,
 };
 
 export function useAutomatedBuilderFlow(
@@ -340,6 +367,28 @@ export function useAutomatedBuilderFlow(
   // NEW: Track auto-detected fields (like RRP for sale products)
   const [autoDetectedFields, setAutoDetectedFields] = useState<Array<{ field: string; selector: string; value: string }>>([]);
 
+  // Validation state
+  const [validationResult, setValidationResult] = useState<{
+    success: boolean;
+    productCount: number;
+    fieldCompleteness: {
+      title: { found: number; total: number; percentage: number };
+      rrp: { found: number; total: number; percentage: number };
+      salePrice: { found: number; total: number; percentage: number };
+      url: { found: number; total: number; percentage: number };
+      image: { found: number; total: number; percentage: number };
+    };
+    sampleProducts: Array<{
+      title?: string;
+      rrp?: string;
+      salePrice?: string;
+      url?: string;
+      image?: string;
+    }>;
+    issues: string[];
+  } | null>(null);
+  const [isValidating, setIsValidating] = useState(false);
+
   // Store item selector for pagination demo
   const itemSelectorRef = useRef<string | undefined>(undefined);
 
@@ -387,6 +436,8 @@ export function useAutomatedBuilderFlow(
           // Wizard steps are being generated
           if (event === 'WIZARD_STEPS_READY') return 'FIELD_CONFIRMATION';
           if (event === 'WIZARD_STEPS_FAILED') return 'LABELING'; // Fallback to manual labeling
+          // NEW: Skip to non-sale wizard when no sale products exist
+          if (event === 'NON_SALE_WIZARD_READY') return 'NON_SALE_FIELD_CONFIRMATION';
           break;
         case 'FIELD_CONFIRMATION':
           // User is confirming fields in the wizard
@@ -430,12 +481,19 @@ export function useAutomatedBuilderFlow(
         case 'GENERATING_NON_SALE_WIZARD':
           // Non-sale wizard steps are being generated
           if (event === 'NON_SALE_WIZARD_READY') return 'NON_SALE_FIELD_CONFIRMATION';
-          if (event === 'NON_SALE_WIZARD_FAILED') return 'FINAL_CONFIG'; // Skip to final config if no non-sale products
+          // If non-sale wizard was already completed before pagination, skip to validation
+          if (event === 'NON_SALE_WIZARD_FAILED') return 'VALIDATING_SELECTORS';
           break;
         case 'NON_SALE_FIELD_CONFIRMATION':
           // User is confirming non-sale product fields
-          if (event === 'NON_SALE_WIZARD_COMPLETED') return 'FINAL_CONFIG';
-          if (event === 'NON_SALE_WIZARD_SKIPPED') return 'FINAL_CONFIG';
+          // After non-sale wizard, go to pagination demo (same as after sale wizard)
+          if (event === 'NON_SALE_WIZARD_COMPLETED') return 'PAGINATION_DEMO';
+          if (event === 'NON_SALE_WIZARD_SKIPPED') return 'PAGINATION_DEMO';
+          break;
+        case 'VALIDATING_SELECTORS':
+          // Selector validation step
+          if (event === 'VALIDATION_COMPLETE') return 'FINAL_CONFIG';
+          if (event === 'VALIDATION_SKIPPED') return 'FINAL_CONFIG';
           break;
         case 'FINAL_CONFIG':
           if (event === 'SAVE_CLICKED') return 'SAVING';
@@ -549,6 +607,18 @@ export function useAutomatedBuilderFlow(
   // Show overlay based on state
   useEffect(() => {
     switch (state) {
+      case 'LAUNCHING_BROWSER':
+        // Show overlay only after browser has opened (session is ready)
+        // This is when popup auto-close starts running
+        if (sessionStatus === 'ready') {
+          setOverlayType('popup_closing');
+          setShowOverlay(true);
+        } else {
+          // Don't show overlay while still connecting
+          setShowOverlay(false);
+          setOverlayType(null);
+        }
+        break;
       case 'CAPTCHA_CHECKING':
         // Quick check, no overlay needed
         setShowOverlay(false);
@@ -569,7 +639,8 @@ export function useAutomatedBuilderFlow(
       case 'FIELD_CONFIRMATION':
       case 'NON_SALE_FIELD_CONFIRMATION':
       case 'NON_SALE_WIZARD_IMMEDIATE':
-        // Wizard has its own overlay component (FieldConfirmationWizard)
+      case 'VALIDATING_SELECTORS':
+        // Wizard/validation has its own UI component
         // Don't show AutomatedBuilderOverlay
         setOverlayType(null);
         setShowOverlay(false);
@@ -586,7 +657,7 @@ export function useAutomatedBuilderFlow(
         setShowOverlay(false);
         setOverlayType(null);
     }
-  }, [state]);
+  }, [state, sessionStatus]);
 
   // Auto-trigger product detection when entering that state
   useEffect(() => {
@@ -660,6 +731,20 @@ export function useAutomatedBuilderFlow(
         if (msg.payload.exampleCount) {
           console.log('[AutomatedFlow] Example counts:', msg.payload.exampleCount);
           setProductTypeCounts(msg.payload.exampleCount);
+
+          // If there are NO sale products, skip the sale wizard entirely
+          // The steps we received are actually for non-sale products (server fallback)
+          if (msg.payload.exampleCount.withSale === 0) {
+            console.log('[AutomatedFlow] No sale products detected - treating wizard as non-sale wizard');
+            // Clear sale wizard steps since we're skipping it
+            setWizardSteps([]);
+            // Store the steps as non-sale wizard steps instead
+            setNonSaleWizardSteps(steps);
+            setNonSaleConfirmedFields([]);
+            // Skip to non-sale wizard display directly
+            transition('NON_SALE_WIZARD_READY');
+            return;
+          }
         }
 
         // NEW: Save auto-detected fields (e.g., RRP from sale products)
@@ -763,6 +848,66 @@ export function useAutomatedBuilderFlow(
 
     return unsubscribe;
   }, [subscribe, transition, state]);
+
+  // Auto-trigger validation when entering VALIDATING_SELECTORS state
+  useEffect(() => {
+    if (state === 'VALIDATING_SELECTORS' && sessionId && detectedProduct?.css) {
+      console.log('[AutomatedFlow] Triggering selector validation');
+      setIsValidating(true);
+      setValidationResult(null);
+
+      // Build field selectors from confirmed fields (sale and non-sale)
+      const fieldSelectors: {
+        title?: string;
+        rrp?: string;
+        salePrice?: string;
+        url?: string;
+        image?: string;
+      } = {};
+
+      // Use sale product selectors (if sale products exist)
+      if (productTypeCounts.withSale > 0) {
+        for (const field of confirmedFields) {
+          if (field.field === 'Title') fieldSelectors.title = field.selector;
+          else if (field.field === 'RRP') fieldSelectors.rrp = field.selector;
+          else if (field.field === 'Sale Price') fieldSelectors.salePrice = field.selector;
+          else if (field.field === 'URL') fieldSelectors.url = field.selector;
+          else if (field.field === 'Image') fieldSelectors.image = field.selector;
+        }
+
+        // Add auto-detected fields (like RRP for sale products)
+        for (const field of autoDetectedFields) {
+          if (field.field === 'RRP' && !fieldSelectors.rrp) {
+            fieldSelectors.rrp = field.selector;
+          }
+        }
+      }
+
+      // Use non-sale selectors (either as primary if no sale products, or as fallback)
+      for (const field of nonSaleConfirmedFields) {
+        if (field.field === 'Title' && !fieldSelectors.title) fieldSelectors.title = field.selector;
+        else if (field.field === 'RRP' && !fieldSelectors.rrp) fieldSelectors.rrp = field.selector;
+        else if (field.field === 'URL' && !fieldSelectors.url) fieldSelectors.url = field.selector;
+        else if (field.field === 'Image' && !fieldSelectors.image) fieldSelectors.image = field.selector;
+      }
+
+      send('builder:validateSelectors', {
+        containerSelector: detectedProduct.css,
+        fieldSelectors,
+      }, sessionId);
+    }
+  }, [state, sessionId, detectedProduct, confirmedFields, nonSaleConfirmedFields, autoDetectedFields, productTypeCounts, send]);
+
+  // Subscribe to validation results
+  useEffect(() => {
+    const unsubscribe = subscribe('builder:validationResult', (msg) => {
+      console.log('[AutomatedFlow] Validation result:', msg.payload);
+      setIsValidating(false);
+      setValidationResult(msg.payload);
+    });
+
+    return unsubscribe;
+  }, [subscribe]);
 
   // Subscribe to pagination demo events
   useEffect(() => {
@@ -924,11 +1069,16 @@ export function useAutomatedBuilderFlow(
       console.log('[AutomatedFlow] Non-sale wizard completed with fields:', fields, 'current state:', state);
       setNonSaleConfirmedFields(fields);
 
-      // NEW: Check if this is the immediate wizard (before pagination)
+      // Check if this is before pagination (either NON_SALE_WIZARD_IMMEDIATE or NON_SALE_FIELD_CONFIRMATION when no sale products)
       if (state === 'NON_SALE_WIZARD_IMMEDIATE') {
         console.log('[AutomatedFlow] Immediate non-sale wizard completed, marking as done');
         setNonSaleCompletedBefore(true);
         transition('IMMEDIATE_NON_SALE_COMPLETED');
+      } else if (state === 'NON_SALE_FIELD_CONFIRMATION') {
+        // This happens when there are no sale products - non-sale wizard shown before pagination
+        console.log('[AutomatedFlow] Non-sale wizard completed (no sale products path), marking as done');
+        setNonSaleCompletedBefore(true);
+        transition('NON_SALE_WIZARD_COMPLETED');
       } else {
         transition('NON_SALE_WIZARD_COMPLETED');
       }
@@ -1088,6 +1238,9 @@ export function useAutomatedBuilderFlow(
     autoDetectedFields,
     productTypeCounts,
     nonSaleCompletedBefore,
+    // Validation data
+    validationResult,
+    isValidating,
     transition,
     handlePopupConfirm,
     handleProductConfirm,
